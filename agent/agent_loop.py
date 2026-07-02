@@ -81,6 +81,7 @@ class AgentLoop:
         on_tool_call: ToolCallCallback | None = None,
         on_response: ResponseCallback | None = None,
         on_delta: Any = None,
+        cancel_event: Any = None,
     ) -> str:
         """跑一轮 Agent 循环。
 
@@ -88,11 +89,15 @@ class AgentLoop:
         每收到一段 LLM 文本就调一次，实现打字效果。
         传了它，chat 内部用 stream=True；不传则非流式。
 
+        cancel_event（可选，#8）：threading.Event，被 set 时 loop 在下一个步骤
+        边界停止后续 LLM 调用——让前端的"停止"按钮能中断生成。
+
         参数：
             user_text:    用户这一轮说的话
             on_tool_call: 工具调用回调（可选）
             on_response:  最终回答回调（可选）
             on_delta:     流式文本片段回调（可选，Phase 7-C）
+            cancel_event: 取消事件（可选，#8）
 
         返回：Agent 的最终文本回答
         """
@@ -103,6 +108,10 @@ class AgentLoop:
         tools_schema = self._tools.all_schemas()
 
         for step in range(self._max_steps):
+            # ── cancel 检查（#8 stop 生效）：步骤边界看是否被取消 ──
+            if cancel_event is not None and cancel_event.is_set():
+                return self._finish_cancelled(on_response, on_delta)
+
             # ── 每轮调 LLM 前：管理历史（设计第 6.2 节）──
             # 参数透传：None 时用 history 模块默认值（Phase 7-D 可配化）
             if self._max_kept_full is not None:
@@ -114,12 +123,18 @@ class AgentLoop:
             else:
                 self._messages = enforce_token_limit(self._messages)
 
-            # ── 调 LLM（传 on_delta 启用流式，Phase 7-C）──
-            response = self._llm.chat(self._messages, tools_schema, on_delta=on_delta)
+            # ── 调 LLM（传 on_delta 启用流式，Phase 7-C；cancel_event 支持 #8）──
+            response = self._llm.chat(
+                self._messages, tools_schema,
+                on_delta=on_delta, cancel_event=cancel_event,
+            )
 
             if response.tool_calls:
                 # LLM 想调工具：处理所有工具调用，继续循环
                 self._handle_tool_calls(response, on_tool_call)
+                # 工具执行后也查 cancel（及时性：不必等到下一步循环开头）
+                if cancel_event is not None and cancel_event.is_set():
+                    return self._finish_cancelled(on_response, on_delta)
                 # 不 return，继续下一轮——LLM 拿到工具结果会再想下一步
             else:
                 # LLM 直接回答了：输出文本，结束循环
@@ -136,6 +151,24 @@ class AgentLoop:
         if on_response:
             on_response(fallback)
         return fallback
+
+    def _finish_cancelled(
+        self,
+        on_response: ResponseCallback | None,
+        on_delta: Any,
+    ) -> str:
+        """cancel 后的收尾：记历史 + 通知前端（#8）。
+
+        流式下 on_response 是 no-op（main.py），所以用 on_delta 把"已停止"
+        标记推给前端气泡，让用户看到生成被中断。
+        """
+        msg = "（已停止）"
+        self._messages.append({"role": "assistant", "content": msg})
+        if on_delta:
+            on_delta("\n\n" + msg)
+        if on_response:
+            on_response(msg)
+        return msg
 
 
     def _handle_tool_calls(

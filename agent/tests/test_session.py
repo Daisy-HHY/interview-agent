@@ -415,3 +415,65 @@ class TestInitParamsPassThrough:
         assert store._max_steps is None  # noqa: SLF001
         assert store._max_history_tokens is None  # noqa: SLF001
         assert store._max_kept_full is None  # noqa: SLF001
+
+
+# ──────────────────────────────────────────────
+# 落盘目录可控（#3 修复）
+# ──────────────────────────────────────────────
+
+
+class TestStorageDir:
+    """configure 应接收显式 storage_dir，不再依赖不可控的 os.getcwd()。
+
+    旧实现 self._sessions_dir = os.path.join(os.getcwd(), ".sessions")：子进程
+    cwd 继承自 Extension Host，跨 VS Code 重启会变，导致崩溃续接失效、且污染
+    用户任意目录。修复后由 init 携带插件数据目录（TS 侧 globalStorageUri）。
+    """
+
+    def test_configure_uses_explicit_storage_dir(self, tmp_path):
+        """configure 传 storage_dir → _sessions_dir 用它（而非 cwd）。"""
+        storage = tmp_path / "storeA"
+        store = SessionStore()
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-x",
+            storage_dir=str(storage),
+        )
+        assert store._sessions_dir == str(storage)  # noqa: SLF001
+
+    def test_falls_back_to_workspace_when_no_storage_dir(self, tmp_path):
+        """不传 storage_dir → 回退到 workspace/.sessions（可预测，不依赖 cwd）。"""
+        import os
+        store = SessionStore()
+        store.configure(workspace=str(tmp_path), api_key="sk-x")
+        expected = os.path.join(str(tmp_path), ".sessions")
+        assert store._sessions_dir == expected  # noqa: SLF001
+
+    def test_save_writes_to_configured_storage_dir(self, tmp_path):
+        """落盘实际写到 configure 传入的 storage_dir（不手动覆盖 _sessions_dir）。"""
+        storage = tmp_path / "myStore"
+        store = SessionStore(llm_factory=lambda: FakeLLM([make_text_response("答")]))
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-x",
+            storage_dir=str(storage),
+        )
+        loop = store.get_or_create("s1")
+        loop.run("问")
+        store.save("s1")
+
+        assert (storage / "s1.json").exists()  # 落在 storage_dir，不是 cwd
+
+    def test_init_passes_storage_dir_to_configure(self, tmp_path):
+        """init 消息带 storage_dir → store.configure 收到。"""
+        store = SessionStore()
+        storage = tmp_path / "fromInit"
+
+        import agent.main as main_mod
+        main_mod._handle_init(store, {
+            "workspace": str(tmp_path),
+            "api_key": "sk-x",
+            "storage_dir": str(storage),
+        })
+
+        assert store._sessions_dir == str(storage)  # noqa: SLF001

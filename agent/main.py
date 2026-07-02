@@ -13,7 +13,9 @@
 把"handle"拆成按 method 分发（init/chat/stop），三种 Request 各自的处理逻辑。
 """
 
+import queue as queue_mod
 import sys
+import threading
 
 # Windows 默认 stdout/stderr 用系统编码（GBK/cp936），会导致中文输出
 # 在某些字符上抛 UnicodeEncodeError。强制改为 UTF-8，与协议约定一致
@@ -32,6 +34,10 @@ def main(
 ) -> None:
     """主循环：读 stdin，分发消息，输出通知。
 
+    异步分发（#8）：chat 在独立 worker 线程串行执行，主线程持续读 stdin，
+    这样"停止"消息能在生成期间及时到达并 set cancel_event，中断 loop。
+    EOF（stdin 关闭）后等 worker 处理完队列再返回（测试确定性 + 生产优雅退出）。
+
     参数：
         stream: 输入流（默认 sys.stdin）。测试可传 io.StringIO。
         store:  会话仓库（默认新建）。测试可注入带 FakeLLM 的 store。
@@ -43,10 +49,40 @@ def main(
     if store is None:
         store = SessionStore()
 
+    # 异步 chat 基础设施（#8）：单 worker 串行跑 chat；每 session 一个
+    # cancel_event，stop handler set 它，loop.run / 流式 chunk 检查它来中断。
+    chat_queue: "queue_mod.Queue[tuple | None]" = queue_mod.Queue()
+    cancel_events: dict[str, threading.Event] = {}
+    state_lock = threading.Lock()
+
+    def get_cancel(session: str) -> threading.Event:
+        with state_lock:
+            if session not in cancel_events:
+                cancel_events[session] = threading.Event()
+            return cancel_events[session]
+
+    def worker() -> None:
+        while True:
+            task = chat_queue.get()
+            if task is None:
+                return  # 关闭信号
+            session, text, cancel_event = task
+            try:
+                _run_chat(store, session, text, cancel_event)
+            except Exception as e:  # worker 兜底，绝不死
+                protocol.notify_error(
+                    session, f"内部错误: {type(e).__name__}: {e}",
+                )
+
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+
     handlers = {
         "init": lambda params: _handle_init(store, params),
-        "chat": lambda params: _handle_chat(store, params),
-        "stop": lambda params: _handle_stop(store, params),
+        "chat": lambda params: _enqueue_chat(chat_queue, get_cancel, params),
+        "stop": lambda params: get_cancel(
+            params.get("session", "default"),
+        ).set(),
     }
 
     for line in stream:
@@ -60,6 +96,11 @@ def main(
             # 业务层错误：发 error 通知，不杀进程（设计第 6.4.2 节）
             session = msg.get("params", {}).get("session", "unknown")
             protocol.notify_error(session, f"内部错误: {type(e).__name__}: {e}")
+
+    # 优雅关闭：让 worker 处理完队列里已入队的 chat 再退出
+    # （测试里 run_input 喂完后等通知完整；生产里 EOF 后等当前 chat 完）
+    chat_queue.put(None)
+    worker_thread.join()
 
 
 # ──────────────────────────────────────────────
@@ -81,6 +122,9 @@ def _handle_init(store: SessionStore, params: dict) -> None:
     max_steps = params.get("max_steps")
     max_history_tokens = params.get("max_history_tokens")
     max_kept_full = params.get("max_kept_full")
+    # 落盘目录（#3 修复）：TS 侧传插件数据目录（globalStorageUri.fsPath），
+    # 让历史落盘位置稳定、可预测，不依赖子进程 cwd。
+    storage_dir = params.get("storage_dir")
 
     if not workspace or not api_key:
         protocol.notify_error(
@@ -98,17 +142,15 @@ def _handle_init(store: SessionStore, params: dict) -> None:
         max_steps=max_steps,
         max_history_tokens=max_history_tokens,
         max_kept_full=max_kept_full,
+        storage_dir=storage_dir,
     )
 
 
-def _handle_chat(store: SessionStore, params: dict) -> None:
-    """处理 chat 消息：跑一轮 Agent 循环（设计第 1.5.3 节时序）。
+def _enqueue_chat(chat_queue, get_cancel, params) -> None:
+    """chat handler：把任务塞进 worker 队列（不阻塞主线程读 stdin，#8）。
 
-    chat 是最常用的消息——用户说的话。整个 Agent 循环在这里触发：
-    1. 取（或新建）session 的 AgentLoop
-    2. 跑 run()，回调把工具调用/回答转成通知
-    3. 落盘历史（设计第 6.4.3 节）
-    4. 发 done 通知
+    入队前 clear 该 session 的 cancel_event（清掉上轮 stop 的残留 set）；
+    worker 跑 loop.run 时带着它，stop handler 随时 set 即可中断。
     """
     session = params.get("session", "default")
     text = params.get("text", "")
@@ -118,6 +160,22 @@ def _handle_chat(store: SessionStore, params: dict) -> None:
     if attached and isinstance(attached, dict) and attached.get("content"):
         text = _inject_attached_code(text, attached)
 
+    cancel_event = get_cancel(session)
+    cancel_event.clear()
+    chat_queue.put((session, text, cancel_event))
+
+
+def _run_chat(
+    store: SessionStore,
+    session: str,
+    text: str,
+    cancel_event: "threading.Event",
+) -> None:
+    """worker 线程里跑一轮 Agent 循环（原 _handle_chat 的执行主体）。
+
+    cancel_event 由 stop handler set；loop.run 在步骤边界、流式 chunk 间检查，
+    被取消时尽快收尾并仍发 done（#8）。
+    """
     if not store.is_configured:
         protocol.notify_error(session, "未初始化：请先发送 init 消息")
         return
@@ -132,14 +190,12 @@ def _handle_chat(store: SessionStore, params: dict) -> None:
             result=result,
         )
 
-    # 流式回调（设计第 1.6 节，Phase 7-C）：每段文本实时推给前端。
-    # on_delta 已经分段推了，所以下面的 on_response 不再整段重复发。
+    # 流式回调（设计第 1.6 节，Phase 7-C）：每段文本实时推给前端
     def on_delta(delta):
         protocol.notify_stream(session, delta)
 
     def on_response(content):
-        # 流式模式下文本已由 on_delta 分段推出，这里不再整段重发。
-        # （content 用于 loop 内部记录历史，不用来推通知。）
+        # 流式模式下文本已由 on_delta 分段推出，这里不再整段重发
         pass
 
     try:
@@ -148,44 +204,33 @@ def _handle_chat(store: SessionStore, params: dict) -> None:
             on_tool_call=on_tool_call,
             on_response=on_response,
             on_delta=on_delta,
+            cancel_event=cancel_event,
         )
     except Exception as e:
-        # LLM 调用失败等：发 error，不杀进程（设计第 6.4.1 节）
+        # LLM 调用失败等：发 error，不杀 worker（设计第 6.4.1 节）
         import traceback
 
         from agent.llm_client import LLMError
 
         tb = traceback.format_exc()
-        # 完整堆栈打到 stderr（显示在 VS Code 的 Interview Agent 输出通道，便于诊断）
+        # 完整堆栈打到 stderr（VS Code 输出通道诊断用）
         sys.stderr.write(tb)
         sys.stderr.flush()
 
-        # 按错误类型给用户不同提示（设计第 6.4.2 节）。
-        # LLMError 携带友好中文提示；其他异常用通用格式。
+        # 按错误类型给用户不同提示（设计第 6.4.2 节）
         if isinstance(e, LLMError):
             protocol.notify_error(session, e.message)
         else:
             protocol.notify_error(
-                session, f"Agent 执行失败: {type(e).__name__}: {e}"
+                session, f"Agent 执行失败: {type(e).__name__}: {e}",
             )
         return
 
     # 落盘历史（每轮对话后存一次，设计第 6.4.3 节）
     store.save(session)
 
-    # 本轮结束
+    # 本轮结束（含被 cancel 收尾的情况——loop.run 也会正常 return）
     protocol.notify_done(session)
-
-
-def _handle_stop(store: SessionStore, params: dict) -> None:
-    """处理 stop 消息：中断当前生成（设计第 1.5.2 节）。
-
-    MVP 阶段 Agent 循环是同步的，stop 主要是个协议占位——
-    真正的中断要在 Phase 6 接异步/线程时实现。
-    收到 stop 至少不崩、不报错。
-    """
-    # MVP：no-op，协议兼容
-    pass
 
 
 def _inject_attached_code(text: str, attached: dict) -> str:

@@ -13,6 +13,7 @@
 
 import json
 import sys
+import threading
 
 # ──────────────────────────────────────────────
 # 入站：解析 VS Code 发来的消息
@@ -72,8 +73,16 @@ def notify(method: str, params: dict) -> None:
     msg = {"jsonrpc": "2.0", "method": method, "params": params}
     # 序列化后清掉孤立代理项，防止 Windows 文件名含坏字符导致编码崩溃
     line = _sanitize(json.dumps(msg, ensure_ascii=False)) + "\n"
-    sys.stdout.write(line)
-    sys.stdout.flush()
+    # 多线程写 stdout（#8：chat 在 worker 线程，与主线程的 error 通知并发）：
+    # 加锁防止两行的字节交错，破坏 TS 侧的按行分帧。
+    with _stdout_lock:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
+# stdout 写入锁：notify 可能从 worker 线程（流式/工具通知）和主线程
+# （error 通知）并发调用，必须串行化以保证"一行一条消息"分帧不被破坏（#8）。
+_stdout_lock = threading.Lock()
 
 
 # 以下是 4 种出站通知的便捷封装，对应设计第 1.5.2 节的消息清单。

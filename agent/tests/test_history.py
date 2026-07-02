@@ -217,12 +217,21 @@ class TestEnforceTokenLimit:
         result = enforce_token_limit(messages, max_tokens=10)
         assert result[-1]["content"] == "这是最新问题，必须保留"
 
-    def test_keeps_minimum_four_messages(self):
-        """裁剪到只剩 4 条时停止（避免删光，留点上下文）。"""
+    def test_keeps_system_and_latest_at_minimum(self):
+        """裁剪至少保留 system 和最新消息（不删光、不破坏配对）。
+
+        旧 pop(1) 实现因 `len(result) > 4` 的停止条件硬保留 4 条（魔数副产物）；
+        配对感知裁剪改为"按组删、保护首末"，下限是首组（system）+ 末组（最新），
+        最少 2 条。核心保证是不删光、不破坏 tool_calls↔tool 配对。
+        """
         big = "x" * 1000
         messages = [_system("s"), _user(big), _user(big), _user(big), _user(big), _user("last")]
         result = enforce_token_limit(messages, max_tokens=5)
-        assert len(result) >= 4  # 至少保留 4 条
+
+        assert result[0] == _system("s")       # 系统提示保留
+        assert result[-1] == _user("last")     # 最新消息保留
+        assert len(result) >= 2                # 不删光
+        assert not _has_orphan_tool(result)    # 无配对破坏（此例无 tool）
 
     def test_original_list_not_mutated(self):
         """裁剪不应修改原 list。"""
@@ -230,3 +239,116 @@ class TestEnforceTokenLimit:
         original_len = len(messages)
         enforce_token_limit(messages, max_tokens=10)
         assert len(messages) == original_len  # 原 list 没变
+
+
+# ──────────────────────────────────────────────
+# tool_calls ↔ tool 配对保护（critical 修复）
+#
+# OpenAI 要求每个 assistant(tool_calls) 紧跟对应 role=tool，
+# 反之每个 role=tool 前必须有带 matching tool_call_id 的 assistant。
+# 裁剪破坏任一方 → 400。旧 pop(1) 盲删会破坏配对。
+# ──────────────────────────────────────────────
+
+
+def _tc_msg(call_id: str) -> dict:
+    """带 tool_calls 的 assistant 消息（OpenAI 格式）。"""
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": call_id, "type": "function",
+         "function": {"name": "x", "arguments": "{}"}}]}
+
+
+def _tool_msg(call_id: str) -> dict:
+    """role=tool 的工具结果消息（带 tool_call_id，OpenAI 格式）。"""
+    return {"role": "tool", "tool_call_id": call_id, "content": "结果"}
+
+
+def _has_orphan_tool(messages: list[dict]) -> bool:
+    """是否有孤立的 role=tool（前面缺带 tool_calls 的 assistant）。"""
+    for i, m in enumerate(messages):
+        if m.get("role") != "tool":
+            continue
+        j = i - 1
+        while j >= 0 and messages[j].get("role") == "tool":
+            j -= 1
+        prev = messages[j] if j >= 0 else None
+        if not (prev and prev.get("role") == "assistant" and prev.get("tool_calls")):
+            return True
+    return False
+
+
+def _has_orphan_tool_calls(messages: list[dict]) -> bool:
+    """是否有 assistant(tool_calls) 后面缺对应 role=tool。"""
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        ids = {tc.get("id") for tc in m["tool_calls"]}
+        seen = set()
+        j = i + 1
+        while j < len(messages) and messages[j].get("role") == "tool":
+            seen.add(messages[j].get("tool_call_id"))
+            j += 1
+        if not ids.issubset(seen):
+            return True
+    return False
+
+
+class TestToolPairingPreservation:
+    """★ critical：裁剪绝不能破坏 assistant(tool_calls) ↔ role=tool 配对。"""
+
+    def test_no_orphan_tool_after_trim(self):
+        """裁剪不能留下孤立的 role=tool（删了它对应的 assistant(tool_calls)）。
+
+        旧 pop(1) 盲删这个用例会删掉 assistant(tool_calls)，留下孤立 tool。
+        """
+        messages = [
+            _system("sys"),
+            _tc_msg("call_X"),       # 带 tool_calls
+            _tool_msg("call_X"),     # 对应 tool
+            _assistant("中间回答"),
+            _user("最新问题"),
+        ]
+        result = enforce_token_limit(messages, max_tokens=1)
+
+        assert not _has_orphan_tool(result), f"留下孤立 tool: {result}"
+        assert not _has_orphan_tool_calls(result), f"留下孤立 tool_calls: {result}"
+
+    def test_multi_turn_tool_history_stays_paired(self):
+        """多轮工具历史裁剪后，保留的部分配对仍完整。"""
+        messages = [
+            _system("sys"),
+            _tc_msg("call_1"), _tool_msg("call_1"),
+            _assistant("第一轮回答"),
+            _tc_msg("call_2"), _tool_msg("call_2"),
+            _assistant("第二轮回答"),
+            _user("最新问题"),
+        ]
+        result = enforce_token_limit(messages, max_tokens=1)
+
+        assert not _has_orphan_tool(result), f"留下孤立 tool: {result}"
+        assert not _has_orphan_tool_calls(result), f"留下孤立 tool_calls: {result}"
+
+    def test_system_and_latest_always_kept(self):
+        """裁剪后 system 仍在首、最新消息仍在尾。"""
+        messages = [
+            _system("重要系统提示"),
+            _tc_msg("call_X"), _tool_msg("call_X"),
+            _user("最新问题"),
+        ]
+        result = enforce_token_limit(messages, max_tokens=1)
+
+        assert result[0]["role"] == "system"
+        assert result[-1]["content"] == "最新问题"
+
+    def test_unpaired_history_not_broken(self):
+        """无 tool 的普通历史裁剪仍正常工作（不误伤）。"""
+        messages = [
+            _system("sys"),
+            _user("x" * 500),
+            _assistant("y" * 500),
+            _user("最新"),
+        ]
+        result = enforce_token_limit(messages, max_tokens=5)
+
+        assert result[0]["role"] == "system"
+        assert result[-1]["content"] == "最新"
+        assert not _has_orphan_tool(result)

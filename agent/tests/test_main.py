@@ -182,7 +182,7 @@ class TestAttachedCode:
         fake = FakeLLM([make_text_response("ok")])
         original_chat = fake.chat
 
-        def spy_chat(messages, tools, on_delta=None):
+        def spy_chat(messages, tools, on_delta=None, cancel_event=None):
             captured.append(messages)
             return original_chat(messages, tools)
 
@@ -212,7 +212,7 @@ class TestAttachedCode:
         fake = FakeLLM([make_text_response("ok")])
         original_chat = fake.chat
 
-        def spy_chat(messages, tools, on_delta=None):
+        def spy_chat(messages, tools, on_delta=None, cancel_event=None):
             captured.append(messages)
             return original_chat(messages, tools)
 
@@ -266,13 +266,13 @@ class TestRobustness:
         """handler 内部抛异常时发 error 通知，不杀进程。"""
         store, _ = make_configured_store(tmp_path)
 
-        # 让 _handle_chat 抛异常
+        # 让 chat handler 抛异常（异步架构下 chat 入队走 _enqueue_chat）
         def boom(params):
             raise RuntimeError("故意的")
 
         monkeypatch.setitem(
-            main_mod.__dict__, "_handle_chat",
-            lambda store, params: boom(params),
+            main_mod.__dict__, "_enqueue_chat",
+            lambda chat_queue, get_cancel, params: boom(params),
         )
 
         # 重新设置 handlers 引用 —— main 里每次都重建 handlers dict，所以 monkeypatch 生效
@@ -327,3 +327,75 @@ class TestMultipleMessages:
         loop = store.get_or_create("s1")
         # 两轮历史累积：system + user1 + asst1 + user2 + asst2
         assert len(loop.messages) == 5
+
+
+# ──────────────────────────────────────────────
+# 异步分发（#8：chat 不阻塞主线程，stop 才能及时到达）
+# ──────────────────────────────────────────────
+
+
+class TestAsyncDispatch:
+    """chat 在 worker 线程执行，主线程持续读 stdin（#8 的前提）。
+
+    配合 TestCancel（loop 步骤边界取消）和 TestStreamingCancel（流式 chunk
+    取消），覆盖 stop 端到端：主线程读到 stop → set cancel_event → loop 停。
+    """
+
+    def test_chat_does_not_block_main_thread(self, tmp_path):
+        """chat 慢（worker 阻塞）时，主线程仍能读到后续消息——证明异步分发。"""
+        import io
+        import json
+        import threading
+
+        gate = threading.Event()
+        init_seen = threading.Event()
+
+        class GatedLLM:
+            def chat(self, messages, tools, on_delta=None, cancel_event=None):
+                gate.wait(timeout=5)  # 阻塞 worker，模拟慢 LLM
+                return make_text_response("答")
+
+        store = SessionStore(llm_factory=lambda: GatedLLM())
+        store._sessions_dir = str(tmp_path / ".sessions")  # noqa: SLF001
+        store.configure(workspace=str(tmp_path), api_key="sk-test")
+
+        # 拦截 _handle_init：若它在 chat 完成前被调，说明主线程没被 chat 阻塞
+        real_init = main_mod._handle_init
+
+        def spy_init(s, params):
+            init_seen.set()
+            real_init(s, params)
+
+        main_mod._handle_init = spy_init  # noqa: SLF001
+        try:
+            chat_line = json.dumps(
+                {"method": "chat", "params": {"session": "s1", "text": "问"}},
+            )
+            init_line = json.dumps({
+                "method": "init",
+                "params": {"workspace": str(tmp_path), "api_key": "sk-x"},
+            })
+            stream = io.StringIO(chat_line + "\n" + init_line + "\n")
+            output = io.StringIO()
+            ow = protocol.sys.stdout.write
+            of = protocol.sys.stdout.flush
+            protocol.sys.stdout.write = output.write
+            protocol.sys.stdout.flush = lambda: None
+            try:
+                t = threading.Thread(
+                    target=main_mod.main,
+                    kwargs={"stream": stream, "store": store},
+                    daemon=True,
+                )
+                t.start()
+                # 主线程应能在 chat(worker 阻塞) 期间读到后续 init
+                assert init_seen.wait(timeout=3), "主线程被 chat 阻塞，未读到后续 init"
+                gate.set()  # release worker，让 chat 完成、main 退出
+                t.join(timeout=5)
+            finally:
+                protocol.sys.stdout.write = ow
+                protocol.sys.stdout.flush = of
+        finally:
+            main_mod._handle_init = real_init  # noqa: SLF001
+
+        assert not t.is_alive(), "main 未退出"

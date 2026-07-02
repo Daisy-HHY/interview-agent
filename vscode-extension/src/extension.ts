@@ -91,6 +91,8 @@ export function activate(context: ExtensionContext): void {
       maxSteps: cfg.maxSteps,
       maxHistoryTokens: cfg.maxHistoryTokens,
       maxKeptFull: cfg.maxKeptFull,
+      // 落盘目录（#3）：插件全局数据目录，跨 VS Code 重启稳定、可预测
+      storageDir: context.globalStorageUri.fsPath,
     });
     panel.open();
   });

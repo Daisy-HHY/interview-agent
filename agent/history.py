@@ -76,19 +76,54 @@ def compress_history(
     ]
 
 
+def _group_for_trim(messages: list[dict]) -> list[list[dict]]:
+    """把消息分成不可分割的组，用于配对感知裁剪。
+
+    OpenAI 要求每个 assistant(tool_calls) 紧跟对应的 role=tool 结果，
+    反之每个 role=tool 必须前接带 matching tool_call_id 的 assistant。
+    所以带 tool_calls 的 assistant + 其后续连续 role=tool 必须视为一组，
+    裁剪时只能整组删除——否则任一方落单都会让下次请求报 HTTP 400。
+    其它消息（system/user/纯文本 assistant）各自独立成组。
+    """
+    groups: list[list[dict]] = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            group = [msg]
+            i += 1
+            while i < n and messages[i].get("role") == "tool":
+                group.append(messages[i])
+                i += 1
+            groups.append(group)
+        else:
+            groups.append([msg])
+            i += 1
+    return groups
+
+
 def enforce_token_limit(
     messages: list[dict],
     max_tokens: int = MAX_HISTORY_TOKENS,
 ) -> list[dict]:
     """第 3 层防线：超过 token 上限时硬裁剪（设计第 6.2.3 节）。
 
-    关键纪律：永远保留 messages[0]（系统提示，Agent 灵魂）
-    和 messages[-1]（最新用户消息，当前要回答的问题）。
-    丢的是中间最老的。
+    配对感知：按 _group_for_trim 分组后整组删除，绝不留下孤立的 tool 或
+    tool_calls（否则 OpenAI 报 400，会话卡死）。
+
+    关键纪律：永远保留首组（messages[0]，通常系统提示）和末组
+    （messages[-1]，最新消息）。从最老的中间组开始丢。
     """
-    result = list(messages)  # 不改原 list
-    while count_tokens(result) > max_tokens and len(result) > 4:
-        # 删掉 index 1（系统提示之后最早的）
-        # 不能删 [0]（系统提示），不能删 [-1]（最新消息）
-        result.pop(1)
-    return result
+    if len(messages) <= 2:
+        return list(messages)  # 不改原 list；首尾即全部，无需裁剪
+
+    groups = _group_for_trim(messages)
+    # 从最老的中间组（index 1）开始删，保护首末两组，直到 token 够或只剩首末
+    while (
+        count_tokens([m for g in groups for m in g]) > max_tokens
+        and len(groups) > 2
+    ):
+        del groups[1]
+
+    return [m for g in groups for m in g]

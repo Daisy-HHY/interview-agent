@@ -397,7 +397,7 @@ class TestStreamingPassthrough:
         class SpyLLM:
             def __init__(self):
                 self.received_delta = None
-            def chat(self, messages, tools, on_delta=None):
+            def chat(self, messages, tools, on_delta=None, cancel_event=None):
                 received_delta_kwargs.append(on_delta)
                 self.received_delta = on_delta
                 # 模拟伪流式：推一次文本
@@ -424,7 +424,7 @@ class TestStreamingPassthrough:
         class SpyLLM:
             def __init__(self):
                 self.received_delta = "unset"
-            def chat(self, messages, tools, on_delta="unset"):
+            def chat(self, messages, tools, on_delta="unset", cancel_event=None):
                 self.received_delta = on_delta
                 return LLMResponse(content="答")
 
@@ -465,3 +465,83 @@ class TestStreamingPassthrough:
         assert result == "流式最终回答"
         # 工具调用轮不推文本 delta；最终回答轮推一次（FakeLLM 伪流式）
         assert deltas == ["流式最终回答"]
+
+
+# ──────────────────────────────────────────────
+# cancel（中断）机制（#8 stop 生效的基础）
+# ──────────────────────────────────────────────
+
+
+class TestCancel:
+    """loop.run 支持 cancel_event，被 set 后尽快停止（#8）。
+
+    stop 按钮要生效，loop 必须能在生成过程中被外部取消。cancel_event 是
+    threading.Event，loop 在每个步骤边界检查，set 了就停止后续 LLM 调用。
+    """
+
+    def test_cancel_before_first_step_skips_llm(self):
+        """run 前 cancel_event 已 set → 不调 LLM，返回中断提示。"""
+        import threading
+
+        fake = FakeLLM([make_text_response("不应到达")])
+        loop = AgentLoop(
+            llm=fake, tools=build_registry(), system_prompt=SYSTEM_PROMPT,
+        )
+        event = threading.Event()
+        event.set()
+
+        result = loop.run("问", cancel_event=event)
+
+        assert fake.call_count == 0  # 没调 LLM
+        assert "停止" in result
+
+    def test_cancel_between_steps_stops_loop(self):
+        """第一步工具完成后 cancel → 不进入第二步的 LLM 调用。"""
+        import threading
+
+        event = threading.Event()
+        fake = FakeLLM([
+            make_tool_call_response("echo", {"text": "x"}),
+            make_text_response("不应到达"),
+        ])
+        loop = AgentLoop(
+            llm=fake, tools=build_registry(EchoTool()), system_prompt=SYSTEM_PROMPT,
+        )
+
+        def on_tool_call(name, args, phase, result):
+            if phase == "end":
+                event.set()  # 第一步工具完成 → 触发 cancel
+
+        result = loop.run("问", on_tool_call=on_tool_call, cancel_event=event)
+
+        assert fake.call_count == 1  # 只调了第一步的 LLM，第二步被 cancel 拦下
+        assert "停止" in result
+
+    def test_cancel_pushes_marker_via_on_delta(self):
+        """cancel 时通过 on_delta 推中断标记，让前端流式气泡可见。"""
+        import threading
+
+        fake = FakeLLM([make_tool_call_response("echo", {"text": "x"})])
+        loop = AgentLoop(
+            llm=fake, tools=build_registry(EchoTool()), system_prompt=SYSTEM_PROMPT,
+        )
+        event = threading.Event()
+        deltas = []
+
+        def on_tool_call(name, args, phase, result):
+            if phase == "end":
+                event.set()
+
+        loop.run("问", on_tool_call=on_tool_call, on_delta=deltas.append,
+                 cancel_event=event)
+
+        assert any("停止" in d for d in deltas)
+
+    def test_no_cancel_event_runs_normally(self):
+        """不传 cancel_event（None）时行为不变（向后兼容）。"""
+        fake = FakeLLM([make_text_response("正常回答")])
+        loop = AgentLoop(
+            llm=fake, tools=build_registry(), system_prompt=SYSTEM_PROMPT,
+        )
+        result = loop.run("问")
+        assert result == "正常回答"

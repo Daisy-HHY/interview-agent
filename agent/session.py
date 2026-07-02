@@ -88,6 +88,8 @@ class SessionStore:
         max_steps: int | None = None,
         max_history_tokens: int | None = None,
         max_kept_full: int | None = None,
+        # 落盘目录（#3 修复）：TS 侧传插件数据目录（globalStorageUri）
+        storage_dir: str | None = None,
     ) -> None:
         """记录 init 消息带来的全局配置。
 
@@ -95,6 +97,11 @@ class SessionStore:
 
         调优参数（max_steps/max_history_tokens/max_kept_full）可选，
         传 None 表示用各模块的硬编码默认值（设计第 6.2、6.4 节）。
+
+        storage_dir：历史落盘目录。优先用它（TS 传插件数据目录，跨 VS Code
+        重启稳定，崩溃续接才生效）；不传则回退 workspace/.sessions（可预测，
+        至少绑死在被面试项目）。不再用 os.getcwd()——它继承 spawn 的 cwd，
+        不可控且跨重启变化（#3 修复）。
         """
         self._workspace = workspace
         self._api_key = api_key
@@ -104,6 +111,10 @@ class SessionStore:
         self._max_steps = max_steps
         self._max_history_tokens = max_history_tokens
         self._max_kept_full = max_kept_full
+        if storage_dir:
+            self._sessions_dir = storage_dir
+        else:
+            self._sessions_dir = os.path.join(workspace, ".sessions")
 
     @property
     def workspace(self) -> str | None:

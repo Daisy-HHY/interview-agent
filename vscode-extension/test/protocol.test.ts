@@ -171,4 +171,14 @@ describe("buildInit", () => {
     expect(req.params.base_url).toBeUndefined();
     expect(req.params.resume).toBeUndefined();
   });
+
+  it("含 storage_dir（#3 落盘目录，对齐 Python storage_dir）", () => {
+    const req = buildInit({
+      workspace: "/p",
+      api_key: "k",
+      model: "m",
+      storage_dir: "/data/sessions",
+    });
+    expect(req.params.storage_dir).toBe("/data/sessions");
+  });
 });

@@ -679,3 +679,247 @@ class TestFakeLLMStreamingCompat:
         fake = FakeLLM([make_text_response("x")])
         resp = fake.chat([], [])
         assert resp.content == "x"
+
+
+# ──────────────────────────────────────────────
+# 流式路径自动重试（#2 修复，设计 6.4.2 对流式生效）
+# ──────────────────────────────────────────────
+
+
+class TestStreamingRetry:
+    """流式路径的可恢复错误自动重试（生产路径恒为流式，重试必须对流式生效）。
+
+    纪律：只在尚未推出任何文本时重试（首 chunk 前的 429/连接/5xx）。
+    一旦已推文本，中途失败只能中断保留——重试会从头生成，造成前端重复。
+    """
+
+    def _client(self, outcomes, monkeypatch):
+        """构造 OpenAIClient，每次 create 按 outcomes 顺序取一个：
+        Exception → raise；list → 返回 iter(chunks)。sleep 置空避免真等。"""
+        from agent.llm_client import OpenAIClient
+        client = OpenAIClient.__new__(OpenAIClient)
+        client._model = "test"
+
+        class MockCreate:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, **kw):
+                self.calls += 1
+                val = outcomes[self.calls - 1]
+                if isinstance(val, Exception):
+                    raise val
+                return iter(val)
+
+        mock = MockCreate()
+
+        class MockChat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    return mock(**kw)
+
+        class MockClient:
+            def __init__(self):
+                self.chat = MockChat()
+
+        client._client = MockClient()
+        monkeypatch.setattr("agent.llm_client.time.sleep", lambda s: None)
+        return client, mock
+
+    def _rl(self):
+        import httpx
+        import openai
+        req = httpx.Request("POST", "https://x/y")
+        resp = httpx.Response(429, request=req, content=b"{}")
+        return openai.RateLimitError("rl", response=resp, body=None)
+
+    def _auth(self):
+        import httpx
+        import openai
+        req = httpx.Request("POST", "https://x/y")
+        resp = httpx.Response(401, request=req, content=b"{}")
+        return openai.AuthenticationError("bad", response=resp, body=None)
+
+    def _conn(self):
+        import openai
+        return openai.APIConnectionError(request=None)
+
+    def test_retries_rate_limit_then_succeeds(self, monkeypatch):
+        """★ 首 chunk 前 429 → 重试 → 第 2 次成功，前端无重复文本。"""
+        client, mock = self._client(
+            [self._rl(), [_make_text_chunk("成功")]], monkeypatch,
+        )
+        received = []
+        resp = client.chat([], [], on_delta=received.append)
+
+        assert resp.content == "成功"
+        assert received == ["成功"]  # 失败的那次没推任何文本，无重复
+        assert mock.calls == 2
+
+    def test_retries_connection_then_succeeds(self, monkeypatch):
+        """★ 首 chunk 前断网 → 重试 → 成功。"""
+        client, mock = self._client(
+            [self._conn(), [_make_text_chunk("OK")]], monkeypatch,
+        )
+        resp = client.chat([], [], on_delta=lambda s: None)
+
+        assert resp.content == "OK"
+        assert mock.calls == 2
+
+    def test_retries_exhausted_raises(self, monkeypatch):
+        """3 次都 429 → 抛 LLMError，不再 sleep。"""
+        from agent.llm_client import LLMError
+        client, mock = self._client(
+            [self._rl(), self._rl(), self._rl()], monkeypatch,
+        )
+        with pytest.raises(LLMError):
+            client.chat([], [], on_delta=lambda s: None)
+        assert mock.calls == 3
+
+    def test_no_retry_on_auth(self, monkeypatch):
+        """401 不可恢复，立刻抛，不重试。"""
+        from agent.llm_client import LLMError
+        client, mock = self._client([self._auth()], monkeypatch)
+        with pytest.raises(LLMError) as ei:
+            client.chat([], [], on_delta=lambda s: None)
+
+        assert ei.value.kind == "auth"
+        assert mock.calls == 1
+
+    def test_no_retry_after_partial_content(self, monkeypatch):
+        """已推出文本后断网：中断保留已生成部分，不重试（重试会从头生成重复）。"""
+
+        def partial_then_fail():
+            yield _make_text_chunk("已生成")
+            raise self._conn()
+
+        client, mock = self._client([partial_then_fail()], monkeypatch)
+        received = []
+        resp = client.chat([], [], on_delta=received.append)
+
+        assert mock.calls == 1  # 没重试
+        assert "已生成" in resp.content
+        assert "中断" in resp.content  # 追加了中断标记
+        assert received == ["已生成"]
+
+
+# ──────────────────────────────────────────────
+# OpenAIClient timeout 配置（#4 防 LLM 调用无限挂死）
+# ──────────────────────────────────────────────
+
+
+class TestTimeoutConfig:
+    """OpenAIClient 构造必须传有限 timeout 给底层 openai client（#4）。
+
+    旧实现 OpenAI(api_key, base_url) 不传 timeout，依赖 SDK 默认 ~600s，
+    配合多步重试可让进程长时间挂死、前端 awaiting 永久 true。
+    """
+
+    def test_init_passes_timeout_to_openai(self, monkeypatch):
+        """构造时 timeout 透传给 openai.OpenAI。"""
+        import openai as _openai
+
+        captured: dict = {}
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(_openai, "OpenAI", FakeOpenAI)
+
+        from agent.llm_client import OpenAIClient
+        OpenAIClient(api_key="sk-test", model="m", base_url=None, timeout=42)
+
+        assert captured.get("timeout") == 42
+
+    def test_default_timeout_is_finite(self, monkeypatch):
+        """默认 timeout 必须是有限正值，不能依赖 SDK 默认（~600s）而 hang。"""
+        import openai as _openai
+
+        captured: dict = {}
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(_openai, "OpenAI", FakeOpenAI)
+
+        from agent.llm_client import OpenAIClient
+        OpenAIClient(api_key="sk-test", model="m")
+
+        t = captured.get("timeout")
+        assert t is not None
+        assert isinstance(t, (int, float)) and t > 0
+
+
+# ──────────────────────────────────────────────
+# 流式 cancel（#8：流式生成中可被中断）
+# ──────────────────────────────────────────────
+
+
+class TestStreamingCancel:
+    """流式生成中 cancel_event 被 set → 停止接收后续 chunk，返回已累积部分。
+
+    用户最常在"面试官正在流式回答"时点停止，所以单步流式必须能中断。
+    """
+
+    def test_breaks_on_cancel_midway(self, monkeypatch):
+        """中途 cancel → 后续 chunk 不再累积，返回已收到的部分文本。"""
+        import threading
+
+        from agent.llm_client import OpenAIClient
+
+        cancel = threading.Event()
+
+        def make_stream():
+            yield _make_text_chunk("a")
+            yield _make_text_chunk("b")
+            cancel.set()  # 模拟外部线程在 b 之后取消
+            yield _make_text_chunk("c")  # 不应被累积
+
+        client = OpenAIClient.__new__(OpenAIClient)
+        client._model = "t"
+
+        class MockChat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    return make_stream()
+
+        class MockClient:
+            def __init__(self):
+                self.chat = MockChat()
+
+        client._client = MockClient()
+
+        received: list = []
+        resp = client.chat([], [], on_delta=received.append, cancel_event=cancel)
+
+        assert resp.content == "ab"  # c 被 cancel 截断
+        assert received == ["a", "b"]
+
+    def test_no_cancel_event_streams_normally(self, monkeypatch):
+        """不传 cancel_event 时流式行为不变（向后兼容）。"""
+        from agent.llm_client import OpenAIClient
+
+        client = OpenAIClient.__new__(OpenAIClient)
+        client._model = "t"
+
+        class MockChat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    return iter([_make_text_chunk("x"), _make_text_chunk("y")])
+
+        class MockClient:
+            def __init__(self):
+                self.chat = MockChat()
+
+        client._client = MockClient()
+
+        received: list = []
+        resp = client.chat([], [], on_delta=received.append)
+
+        assert resp.content == "xy"
+        assert received == ["x", "y"]

@@ -47,6 +47,8 @@ export interface PanelOptions {
   maxSteps?: number;
   maxHistoryTokens?: number;
   maxKeptFull?: number;
+  /** 历史落盘目录（#3）：插件数据目录，透传给 Python。 */
+  storageDir?: string;
 }
 
 export class InterviewPanel {
@@ -74,6 +76,7 @@ export class InterviewPanel {
       maxSteps: options.maxSteps,
       maxHistoryTokens: options.maxHistoryTokens,
       maxKeptFull: options.maxKeptFull,
+      storageDir: options.storageDir,
     });
   }
 

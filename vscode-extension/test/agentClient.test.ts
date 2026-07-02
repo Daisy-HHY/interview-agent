@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
+import { EventEmitter } from "events";
 import {
   AgentClient,
   extractLines,
@@ -170,3 +171,64 @@ describe("AgentClient 集成（真实子进程路由）", () => {
 
 // 测试内复用 protocol.parse 的逻辑（避免循环导入歧义，单独引用）
 import { parse as parseLine } from "../src/protocol";
+
+// ──────────────────────────────────────────────
+// stderr / exit 路由（#9 错误气泡去重）
+//
+// 纪律：Python 的 stderr 是给开发者的诊断（traceback、warnings、logging），
+// 不应变成给用户的红色错误气泡——否则同一个 LLM 错误会同时被
+// main.py 的 notify_error（一个气泡）和 stderr（又一个气泡）弹两次。
+// 错误气泡只由 Python 主动发的 "error" 通知 + 进程级错误（非 0 退出）触发。
+// ──────────────────────────────────────────────
+
+describe("AgentClient stderr / exit 路由（#9 错误气泡去重）", () => {
+  function makeClient() {
+    return new AgentClient({
+      pythonPath: "node",
+      scriptPath: "x",
+      workspace: "/f",
+      pythonPathRoot: "/f",
+      apiKey: "k",
+      model: "m",
+      session: "s",
+    });
+  }
+
+  it("stderr 只进诊断日志，不触发 onError 红气泡", () => {
+    const client = makeClient();
+    const errors: string[] = [];
+    const logs: string[] = [];
+    client.onError((m) => errors.push(m));
+    client.onLog((m) => logs.push(m));
+
+    // 注入假子进程（EventEmitter 模拟 stderr 流）并接线
+    const stderr = Object.assign(new EventEmitter(), { setEncoding() {} });
+    const fakeProc = Object.assign(new EventEmitter(), {
+      stderr,
+      stdout: Object.assign(new EventEmitter(), { setEncoding() {} }),
+      stdin: { write() {}, end() {}, writable: true },
+    });
+    (client as unknown as { proc: unknown }).proc = fakeProc;
+    (client as unknown as { wireStderr: () => void }).wireStderr();
+
+    stderr.emit("data", "Python Warning: deprecation\n");
+
+    expect(errors).toEqual([]); // ★ stderr 不弹错误气泡
+    expect(logs.some((l) => l.includes("Python Warning"))).toBe(true);
+  });
+
+  it("进程非 0 退出仍触发 onError（进程级错误该弹气泡）", () => {
+    const client = makeClient();
+    const errors: string[] = [];
+    client.onError((m) => errors.push(m));
+
+    const fakeProc = new EventEmitter();
+    (client as unknown as { proc: unknown }).proc = fakeProc;
+    (client as unknown as { wireExit: () => void }).wireExit();
+
+    fakeProc.emit("exit", 1, null);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("退出");
+  });
+});

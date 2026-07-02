@@ -31,6 +31,8 @@ export interface InitRequest {
     max_steps?: number;
     max_history_tokens?: number;
     max_kept_full?: number;
+    /** 历史落盘目录（#3）：TS 传插件 globalStorageUri，让落盘稳定可预测。 */
+    storage_dir?: string;
   };
 }
 

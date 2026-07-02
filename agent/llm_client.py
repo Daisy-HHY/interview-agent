@@ -126,11 +126,15 @@ class LLMClient(Protocol):
         messages: list[dict],
         tools: list[dict],
         on_delta: Any = None,  # 可选：流式文本回调 Callable[[str], None]
+        cancel_event: Any = None,  # 可选：取消事件（#8），流式生成中检查
     ) -> LLMResponse:
         """调一次 LLM，返回结构化响应。
 
         on_delta（可选）：流式输出时，每收到一段文本就调一次回调
         （设计第 1.6 节打字效果）。非流式实现（FakeLLM）可忽略此参数。
+
+        cancel_event（可选，#8）：threading.Event，流式生成中被 set 时尽快
+        停止接收后续 chunk，让"停止"按钮能中断正在生成的回答。
         """
         ...
 
@@ -159,6 +163,7 @@ class FakeLLM:
         messages: list[dict],
         tools: list[dict],
         on_delta: Any = None,
+        cancel_event: Any = None,
     ) -> LLMResponse:
         self.call_count += 1
         if self._index >= len(self._script):
@@ -214,18 +219,22 @@ class OpenAIClient:
         api_key: str,
         model: str = "gpt-4o-mini",
         base_url: str | None = None,
+        timeout: float = 120.0,
     ) -> None:
         # 延迟导入：只在真实使用时才 import openai
         # 这样测试代码 import llm_client 时不会强依赖 openai 库
         from openai import OpenAI
         self._model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # timeout（#4 修复）：必须给有限值，否则 SDK 默认 ~600s + 多步重试会让
+        # 进程长时间挂死、前端 awaiting 永久 true。120s 覆盖绝大多数正常响应。
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     def chat(
         self,
         messages: list[dict],
         tools: list[dict],
         on_delta: Any = None,
+        cancel_event: Any = None,
     ) -> LLMResponse:
         # 终极防御：清掉所有数据里的孤立代理项。
         # Windows 文件名/文件内容可能含 \udcaa 等代理项，openai 序列化请求
@@ -244,7 +253,7 @@ class OpenAIClient:
         # 传了 on_delta 回调 → 用 stream=True，边收边推 delta（打字效果）
         # 没传 → 非流式（简单，FakeLLM/测试默认路径）
         if on_delta is not None:
-            return self._chat_streaming(kwargs, on_delta)
+            return self._chat_streaming(kwargs, on_delta, cancel_event)
         return self._chat_blocking(kwargs)
 
     def _chat_blocking(self, kwargs: dict[str, Any]) -> LLMResponse:
@@ -255,14 +264,55 @@ class OpenAIClient:
 
     def _chat_streaming(
         self, kwargs: dict[str, Any], on_delta: Any,
+        cancel_event: Any = None,
     ) -> LLMResponse:
         """流式调用（设计第 1.6、6.5 节）。
 
-        - 边收边把文本 delta 通过 on_delta 推出去（打字效果）
-        - tool_calls 分片到达，累积拼接（openai 流式的 arguments 是分段的）
-        - 中断保留（设计 6.5）：网络断了保留已收部分，追加错误标记，不丢文字
+        生产路径恒为流式（main.py 总传 on_delta），所以自动重试必须对流式生效
+        （设计第 6.4.2 节，#2 修复）。
 
-        返回累积后的完整 LLMResponse（和 _chat_blocking 相同接口）。
+        重试纪律：只在"尚未推出任何文本"时重试（首 chunk 前的 429/连接/5xx）。
+        一旦已向 on_delta 推出过文本，就不再重试——重试会让模型从头生成，
+        造成前端文本重复；那种情况走"中断保留"。
+        """
+        max_attempts = 3
+        delay = 1.0
+        last_error: LLMError | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                # _run_one_stream 在"已推文本后可恢复失败"时返回中断保留
+                # LLMResponse（不 raise，故不进 except、不重试）。
+                return self._run_one_stream(kwargs, on_delta, cancel_event)
+            except Exception as e:
+                import openai as _openai
+                # 非 openai 异常（程序 bug）：不重试，直接抛
+                if not isinstance(e, _openai.APIError):
+                    raise
+                last_error = _classify_openai_error(e)
+                # 不可恢复（auth）：立刻抛
+                if last_error.kind == ERROR_KIND_AUTH:
+                    raise last_error
+                # 最后一次：直接抛（不再 sleep）
+                if attempt == max_attempts - 1:
+                    raise last_error
+                # 中间次：指数退避后重试（此时 on_delta 尚未收到任何文本，无重复风险）
+                time.sleep(delay)
+                delay *= 2
+
+        assert last_error is not None
+        raise last_error
+
+    def _run_one_stream(
+        self, kwargs: dict[str, Any], on_delta: Any,
+        cancel_event: Any = None,
+    ) -> LLMResponse:
+        """跑一次流式请求，返回累积后的 LLMResponse。
+
+        - 边收边把文本 delta 通过 on_delta 推出去（打字效果）
+        - tool_calls 分片到达，按 index 累积拼接（openai 流式 arguments 是分段的）
+        - 已推出文本后遇到可恢复错误：返回中断保留 LLMResponse（不 raise），
+          让上层不重试；空内容或不可恢复失败则抛原始异常，交上层重试
         """
         kwargs["stream"] = True
 
@@ -273,6 +323,9 @@ class OpenAIClient:
         try:
             stream = self._client.chat.completions.create(**kwargs)
             for chunk in stream:
+                # cancel（#8）：流式生成中被取消，停止接收后续 chunk，返回已累积文本
+                if cancel_event is not None and cancel_event.is_set():
+                    return LLMResponse(content=accumulated_content, tool_calls=[])
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -306,12 +359,11 @@ class OpenAIClient:
                                 slot["arguments"] += tc.function.arguments
 
         except Exception as e:
-            # 中断保留（设计第 6.5 节）：流式中途出错（断网等）
-            # 保留已生成的文本，追加错误标记，让用户知道生成被中断
+            # 中断保留（设计第 6.5 节）：已推出文本后遇到可恢复错误，
+            # 保留已生成文本 + 追加中断标记，不重试（重试会从头生成造成重复）。
             import openai as _openai
             if isinstance(e, _openai.APIError):
                 err = _classify_openai_error(e)
-                # 可恢复错误且已有内容：保留 + 标记中断
                 if accumulated_content and err.kind in (
                     ERROR_KIND_CONNECTION, ERROR_KIND_SERVER, ERROR_KIND_RATE_LIMIT,
                 ):
@@ -321,8 +373,7 @@ class OpenAIClient:
                         + err.message
                         + "）。已生成部分保留，可重新发送。",
                     )
-                # 不可恢复或无内容：抛错（走外层错误处理）
-                raise err
+            # 空内容 / 不可恢复：抛原始异常，交上层分类 + 重试决策
             raise
 
         # 组装 tool_calls（按 index 排序）

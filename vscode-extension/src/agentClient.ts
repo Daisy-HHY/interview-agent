@@ -49,6 +49,11 @@ export interface AgentClientOptions {
    * 零费用跑完整闭环，展示面试官对话/工具气泡/流式效果。
    */
   demoMode?: boolean;
+  /**
+   * 历史落盘目录（#3）：通常传 context.globalStorageUri.fsPath（插件数据目录），
+   * 让 .sessions 历史落盘位置稳定、跨 VS Code 重启可续接，不污染用户项目目录。
+   */
+  storageDir?: string;
 }
 
 /** 进程级错误的回调签名。 */
@@ -124,6 +129,8 @@ export class AgentClient {
       max_steps: this.options.maxSteps,
       max_history_tokens: this.options.maxHistoryTokens,
       max_kept_full: this.options.maxKeptFull,
+      // 落盘目录（#3）：插件数据目录，让历史续接可预测
+      storage_dir: this.options.storageDir,
     }));
   }
 
@@ -212,10 +219,12 @@ export class AgentClient {
     this.proc.stderr.setEncoding("utf-8");
     this.proc.stderr.on("data", (chunk: string) => {
       const text = chunk.trim();
-      // stderr 同时走诊断日志（永远可见）和错误回调（前端红色气泡）
-      // 设计第 6.4.1 节：Python 的 traceback 走 stderr
+      // stderr 是给开发者的诊断（traceback / warnings / logging），只进日志，
+      // 不弹红色错误气泡——否则与 main.py 的 notify_error 对同一错误弹两次，
+      // 且 Python 任何 warning 也会被误当成错误（#9 修复，设计第 6.4.1 节）。
+      // 给用户的错误气泡只由 Python 主动发的 "error" 通知 + 进程级错误
+      // （非 0 退出）触发，后者由 wireExit 兜底。
       this.log(`[stderr] ${text}`);
-      this.emitError(`Python stderr: ${text}`);
     });
   }
 
