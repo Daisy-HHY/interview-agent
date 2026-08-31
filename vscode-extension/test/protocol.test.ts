@@ -47,12 +47,14 @@ describe("serialize", () => {
         workspace: "/proj",
         api_key: "sk-x",
         model: "gpt-4o-mini",
+        agent_runtime: "langchain",
       }),
     );
     const msg = JSON.parse(line);
     expect(msg.method).toBe("init");
     expect(msg.params.api_key).toBe("sk-x");
     expect(msg.params.workspace).toBe("/proj");
+    expect(msg.params.agent_runtime).toBe("langchain");
   });
 
   it("中文字符不被转义", () => {

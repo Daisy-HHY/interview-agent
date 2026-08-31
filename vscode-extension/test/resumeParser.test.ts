@@ -2,21 +2,29 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { window } from "vscode";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const JSZip = require("jszip");
 
 vi.mock("vscode", () => ({
   commands: {},
   Uri: { joinPath: (...parts: Array<{ fsPath?: string } | string>) => parts.at(-1) },
-  window: {},
+  window: {
+    createOutputChannel: vi.fn(() => ({
+      appendLine: vi.fn(),
+      show: vi.fn(),
+    })),
+  },
 }));
 
 import {
   buildInstallCommand,
   buildOcrInstallCommand,
   getResumeFilePathFromTabInput,
+  InterviewViewProvider,
   parseResumeOcrProgressLine,
   parseResumeFile,
+  withResumeParseTimeout,
 } from "../src/webviewPanel";
 
 let tempRoot = "";
@@ -147,6 +155,26 @@ describe("parseResumeFile", () => {
     expect(statuses).toContain("正在识别扫描版 PDF...");
   });
 
+  it("PDF 主解析器卡住时触发文字层备用解析", async () => {
+    const file = tempFile("resume.pdf", "%PDF-1.4\n");
+    const statuses: string[] = [];
+    let fallbackReason = "";
+
+    const result = await parseResumeFile(file, {
+      onStatus: (message) => statuses.push(message),
+      pdfText: async () => new Promise<string>(() => {}),
+      pdfTextFallback: async (_filePath, reason) => {
+        fallbackReason = reason;
+        return "PyMuPDF Redis MySQL";
+      },
+      pdfTextTimeoutMs: 5,
+    });
+
+    expect(result.content).toBe("PyMuPDF Redis MySQL");
+    expect(fallbackReason).toContain("PDF 文字层解析超时");
+    expect(statuses).toContain("正在使用备用 PDF 解析...");
+  });
+
   it("PDF 有文字层时不触发 OCR fallback", async () => {
     const file = tempFile("resume.pdf", "%PDF-1.4\n");
     let ocrCalled = false;
@@ -233,5 +261,57 @@ describe("parseResumeFile", () => {
       totalPages: 3,
       elapsedMs: 1234,
     });
+  });
+
+  it("简历解析卡住时会超时返回错误", async () => {
+    const never = new Promise<string>(() => {});
+
+    await expect(withResumeParseTimeout(never, 5)).rejects.toThrow("读取简历超时");
+  });
+
+  it("点击上传走 Host 文件选择器并成功回传 resumePicked", async () => {
+    const file = tempFile("resume.txt", "后端开发，熟悉 Redis");
+    const posted: any[] = [];
+    let receiveMessage: ((message: any) => void) | undefined;
+    vi.mocked(window).showOpenDialog = vi.fn().mockResolvedValue([
+      { fsPath: file },
+    ]);
+
+    const webview = {
+      onDidReceiveMessage: (callback: (message: any) => void) => {
+        receiveMessage = callback;
+      },
+      postMessage: vi.fn((message: any) => {
+        posted.push(message);
+        return Promise.resolve(true);
+      }),
+    };
+    const provider = new InterviewViewProvider(
+      { fsPath: "" } as any,
+      () => ({
+        pythonPath: "python",
+        scriptPath: "",
+        workspace: tempRoot,
+        workspaceName: "test",
+        hasWorkspace: true,
+        pythonPathRoot: "",
+        requirementsPath: "",
+        requirementsOcrPath: "",
+        apiKey: "sk-test",
+        model: "gpt-test",
+      }),
+      async () => {},
+    );
+
+    (provider as any).wireMessages(webview);
+    receiveMessage?.({ type: "pickResume" });
+
+    await vi.waitFor(() => {
+      expect(posted.some((item) => item.type === "resumePicked")).toBe(true);
+    });
+
+    const picked = posted.find((item) => item.type === "resumePicked");
+    expect(picked.resume.fileName).toBe("resume.txt");
+    expect(picked.resume.content).toContain("Redis");
   });
 });

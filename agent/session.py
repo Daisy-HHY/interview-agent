@@ -13,9 +13,9 @@ import json
 import os
 from typing import Any, Callable
 
-from agent.agent_loop import AgentLoop
 from agent.llm_client import LLMClient
 from agent.prompt_builder import build_system_message
+from agent.runtime import AgentRuntime, NativeAgentRuntime
 from agent.tools.base import ToolRegistry
 
 
@@ -56,6 +56,7 @@ class SessionStore:
         self._model: str = "gpt-4o-mini"
         self._base_url: str | None = None
         self._resume: str | None = None
+        self._agent_runtime: str = "native"
 
         # 调优参数（设计第 6.2、6.4 节，Phase 7-D 可配化）。
         # 默认 None：在 _create_loop 里取各自模块的硬编码默认值。
@@ -63,8 +64,8 @@ class SessionStore:
         self._max_history_tokens: int | None = None
         self._max_kept_full: int | None = None
 
-        # 每个 session 一个 AgentLoop（含独立历史）
-        self._loops: dict[str, AgentLoop] = {}
+        # 每个 session 一个 AgentRuntime（含独立历史）
+        self._loops: dict[str, AgentRuntime] = {}
 
         # 历史落盘目录（设计第 6.4.3 节）
         self._sessions_dir = os.path.join(os.getcwd(), ".sessions")
@@ -88,6 +89,7 @@ class SessionStore:
         max_steps: int | None = None,
         max_history_tokens: int | None = None,
         max_kept_full: int | None = None,
+        agent_runtime: str = "native",
     ) -> None:
         """记录 init 消息带来的全局配置。
 
@@ -105,6 +107,9 @@ class SessionStore:
         self._max_steps = max_steps
         self._max_history_tokens = max_history_tokens
         self._max_kept_full = max_kept_full
+        self._agent_runtime = (
+            agent_runtime if agent_runtime in {"native", "langchain"} else "native"
+        )
 
     @property
     def workspace(self) -> str | None:
@@ -122,7 +127,7 @@ class SessionStore:
     # session 获取 / 创建（含历史恢复）
     # ──────────────────────────────────────────────
 
-    def get_or_create(self, session_id: str) -> AgentLoop:
+    def get_or_create(self, session_id: str) -> AgentRuntime:
         """取一个 session 的 AgentLoop，没有就新建。
 
         新建时：优先从 .sessions/{id}.json 恢复历史（设计第 6.4.3 节）。
@@ -134,8 +139,8 @@ class SessionStore:
         self._loops[session_id] = loop
         return loop
 
-    def _create_loop(self, session_id: str) -> AgentLoop:
-        """新建一个 AgentLoop，装配工具 + 系统提示 + 恢复历史。"""
+    def _create_loop(self, session_id: str) -> AgentRuntime:
+        """新建一个 AgentRuntime，装配工具 + 系统提示 + 恢复历史。"""
         if not self.is_configured:
             raise RuntimeError("SessionStore 未 init：先调用 configure()")
 
@@ -145,23 +150,62 @@ class SessionStore:
         # 组装系统提示（设计第 4.7 节：注入 workspace 和 resume）
         system_msg = build_system_message(self._workspace, self._resume)  # type: ignore[arg-type]
 
-        # 建真实 LLM 客户端（init 带来的 key/model）
-        llm = self._build_llm()
-
-        loop = AgentLoop(
-            llm=llm,
-            tools=tools,
-            system_prompt=system_msg["content"],
-            # 调优参数透传（Phase 7-D，None 用默认值）
-            max_steps=self._max_steps if self._max_steps is not None else 8,
-            max_history_tokens=self._max_history_tokens,
-            max_kept_full=self._max_kept_full,
-        )
+        loop = self._build_runtime(tools, system_msg["content"])
 
         # 尝试从盘恢复历史（设计第 6.4.3 节）
         self._restore(loop, session_id)
 
         return loop
+
+    def _build_runtime(self, tools: ToolRegistry, system_prompt: str) -> AgentRuntime:
+        """根据配置创建 native 或 LangChain runtime。"""
+        max_steps = self._max_steps if self._max_steps is not None else 8
+        use_langchain = (
+            self._agent_runtime == "langchain"
+            and os.environ.get("INTERVIEW_FAKE_LLM") != "1"
+        )
+        if self._agent_runtime == "langchain" and not use_langchain:
+            import sys
+
+            sys.stderr.write("[runtime] Demo Mode 使用 native/FakeLLM，忽略 langchain。\n")
+            sys.stderr.flush()
+
+        if use_langchain:
+            if _langchain_available():
+                from agent.langchain_runtime import LangChainAgentRuntime
+
+                return LangChainAgentRuntime(
+                    api_key=self._api_key or "",
+                    model=self._model,
+                    base_url=self._base_url,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    max_steps=max_steps,
+                    max_history_tokens=self._max_history_tokens,
+                    max_kept_full=self._max_kept_full,
+                )
+            import sys
+            from pathlib import Path
+
+            requirements = Path(__file__).resolve().parents[1] / "requirements-framework.txt"
+
+            sys.stderr.write(
+                "[runtime] 缺少 LangChain 运行时依赖，已回退到 native。"
+                f"可执行：python -m pip install -r {requirements}\n"
+            )
+            sys.stderr.flush()
+
+        # 建真实 LLM 客户端（init 带来的 key/model）
+        llm = self._build_llm()
+        return NativeAgentRuntime(
+            llm=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            # 调优参数透传（Phase 7-D，None 用默认值）
+            max_steps=max_steps,
+            max_history_tokens=self._max_history_tokens,
+            max_kept_full=self._max_kept_full,
+        )
 
     def _build_llm(self) -> LLMClient:
         """根据 init 配置建 LLM 客户端。
@@ -251,7 +295,7 @@ class SessionStore:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(messages, f, ensure_ascii=False, indent=2)
 
-    def _restore(self, loop: AgentLoop, session_id: str) -> None:
+    def _restore(self, loop: AgentRuntime, session_id: str) -> None:
         """从盘恢复历史到 loop（文件不存在则跳过）。"""
         path = self._session_path(session_id)
         if not os.path.isfile(path):
@@ -307,6 +351,16 @@ def build_default_registry(workspace: str) -> ToolRegistry:
     registry.register(ReadFileTool(workspace))
     registry.register(LookupQuestionsTool())
     return registry
+
+
+def _langchain_available() -> bool:
+    """检查 LangChain runtime 的可选依赖是否可导入。"""
+    import importlib.util
+
+    return (
+        importlib.util.find_spec("langchain") is not None
+        and importlib.util.find_spec("langchain_openai") is not None
+    )
 
 
 # ──────────────────────────────────────────────

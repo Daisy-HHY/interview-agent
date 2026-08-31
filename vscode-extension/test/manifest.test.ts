@@ -21,6 +21,12 @@ describe("VS Code manifest", () => {
     expect(manifest.activationEvents).toContain("onView:interview.chatView");
   });
 
+  it("声明 Agent runtime 切换配置，默认保持 native", () => {
+    const runtime = manifest.contributes.configuration.properties["interview.agentRuntime"];
+    expect(runtime.default).toBe("native");
+    expect(runtime.enum).toEqual(["native", "langchain"]);
+  });
+
   it("监听系统拖入文件被 VS Code 打开后的兜底 Tab 事件", () => {
     expect(extensionSource).toContain("window.tabGroups.onDidChangeTabs");
     expect(extensionSource).toContain("provider.captureOpenedResumeTab(tab)");

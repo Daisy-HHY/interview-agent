@@ -47,4 +47,15 @@ fs.writeFileSync(
   "utf-8",
 );
 
+fs.writeFileSync(
+  path.join(extensionRoot, "bundled-agent", "requirements-framework.txt"),
+  [
+    "langchain>=1.0,<2",
+    "langchain-openai>=1.0,<2",
+    "langgraph>=1.0,<2",
+    "",
+  ].join("\n"),
+  "utf-8",
+);
+
 console.log(`Copied Agent runtime to ${target}`);

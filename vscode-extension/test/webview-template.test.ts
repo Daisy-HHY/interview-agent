@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const webviewRoot = join(__dirname, "..", "src", "webview");
 const html = readFileSync(join(webviewRoot, "index.html"), "utf-8");
-const script = readFileSync(join(webviewRoot, "main.js"), "utf-8");
+const script = readFileSync(join(webviewRoot, "main.js"), "utf-8").replace(/\r\n/g, "\n");
 const styles = readFileSync(join(webviewRoot, "styles.css"), "utf-8");
 const panelSource = readFileSync(join(__dirname, "..", "src", "webviewPanel.ts"), "utf-8");
 
@@ -23,6 +23,7 @@ describe("Webview 面试入口模板", () => {
     expect(html).toContain("支持 .pdf / .docx / .txt / .md / 图片");
     expect(html).toContain('class="resume-upload"');
     expect(html).toContain('id="resumeFileInput"');
+    expect(html).not.toContain('for="resumeFileInput"');
     expect(html).toContain('type="file"');
     expect(html).toContain('accept=".pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp');
     expect(html).toContain('id="resumeSupplement"');
@@ -43,6 +44,10 @@ describe("Webview 面试入口模板", () => {
 
   it("简历上传区支持拖拽上传", () => {
     expect(script).toContain('resumeFileInputEl.addEventListener("change"');
+    expect(script).toContain('pickResumeBtn.addEventListener("click"');
+    expect(script).toContain("event.preventDefault()");
+    expect(script).toContain('vscode.postMessage({ type: "pickResume" })');
+    expect(script).toContain('console.info("[resume-debug]"');
     expect(script).toContain("function onResumeDrag");
     expect(script).toContain("function armResumeFileDrop");
     expect(script).toContain('"armResumeFileDrop"');

@@ -17,7 +17,7 @@ Interview Agent 是一个 VS Code 侧边栏 AI 技术面试官插件。打开任
 
 ## 从 GitHub Release 安装
 
-1. 到 GitHub Release 下载 `interview-agent-0.1.10.vsix`
+1. 到 GitHub Release 下载 `interview-agent-0.1.11.vsix`
 2. VS Code 执行 `Extensions: Install from VSIX...`
 3. 选择下载的 `.vsix`
 4. 打开要准备面试的目标项目文件夹
@@ -86,7 +86,7 @@ Markdown 报告包含 JD 摘要、项目摘要、考察技术点、回答表现�
 
 | 问题 | 处理方式 |
 |---|---|
-| 面板空白或提示没有数据提供程序 | 确认安装的是 `0.1.10` VSIX，执行 `Developer: Reload Window` |
+| 面板空白或提示没有数据提供程序 | 确认安装的是 `0.1.11` VSIX，执行 `Developer: Reload Window` |
 | 缺少 Python 依赖 | 在面板点击“安装 Agent 依赖”，或手动执行 `python -m pip install openai` |
 | Python 路径不对 | 在设置里填写 `interview.pythonPath` 为目标解释器完整路径 |
 | API Key 错误 | 检查 `interview.apiKey` 和账户额度 |

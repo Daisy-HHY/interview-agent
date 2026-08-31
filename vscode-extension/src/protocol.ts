@@ -31,6 +31,8 @@ export interface InitRequest {
     max_steps?: number;
     max_history_tokens?: number;
     max_kept_full?: number;
+    /** Agent runtime：默认 native，可选 langchain。 */
+    agent_runtime?: "native" | "langchain";
   };
 }
 

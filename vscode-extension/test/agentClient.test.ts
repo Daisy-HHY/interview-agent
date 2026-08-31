@@ -16,7 +16,7 @@ import {
   extractLines,
   serializeLine,
 } from "../src/agentClient";
-import { buildChat, ParsedNotification } from "../src/protocol";
+import { buildChat, buildInit, ParsedNotification } from "../src/protocol";
 
 // ──────────────────────────────────────────────
 // serializeLine
@@ -27,6 +27,16 @@ describe("serializeLine", () => {
     const line = serializeLine(buildChat({ session: "s1", text: "hi" }));
     expect(line.endsWith("\n")).toBe(true);
     expect(JSON.parse(line).method).toBe("chat");
+  });
+
+  it("init 会携带 agent_runtime", () => {
+    const line = serializeLine(buildInit({
+      workspace: "/fake",
+      api_key: "sk",
+      model: "m",
+      agent_runtime: "langchain",
+    }));
+    expect(JSON.parse(line).params.agent_runtime).toBe("langchain");
   });
 });
 

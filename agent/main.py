@@ -126,6 +126,7 @@ def _handle_init(store: SessionStore, params: dict) -> None:
     max_steps = params.get("max_steps")
     max_history_tokens = params.get("max_history_tokens")
     max_kept_full = params.get("max_kept_full")
+    agent_runtime = params.get("agent_runtime", "native")
 
     if not workspace or not api_key:
         protocol.notify_error(
@@ -143,6 +144,7 @@ def _handle_init(store: SessionStore, params: dict) -> None:
         max_steps=max_steps,
         max_history_tokens=max_history_tokens,
         max_kept_full=max_kept_full,
+        agent_runtime=agent_runtime,
     )
 
 

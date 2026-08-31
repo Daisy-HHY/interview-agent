@@ -433,6 +433,7 @@ button:disabled {
   opacity: 0;
   cursor: pointer;
   z-index: 2;
+  pointer-events: none;
 }
 
 .resume-upload__icon,

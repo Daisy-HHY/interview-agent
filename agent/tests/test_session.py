@@ -390,6 +390,22 @@ class TestTunableParams:
         assert loop.messages[-1]["role"] == "assistant"  # 最新保留
 
 
+class TestRuntimeSelection:
+    def test_demo_mode_forces_native_runtime(self, tmp_path, monkeypatch):
+        """Demo Mode 必须使用 native/FakeLLM，不能因配置 langchain 误调真实模型。"""
+        monkeypatch.setenv("INTERVIEW_FAKE_LLM", "1")
+        store = SessionStore()
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="demo",
+            agent_runtime="langchain",
+        )
+
+        loop = store.get_or_create("s1")
+
+        assert type(loop).__name__ == "AgentLoop"
+
+
 class TestInitParamsPassThrough:
     """验证 main._handle_init 把调优参数透传给 SessionStore。"""
 
@@ -411,6 +427,20 @@ class TestInitParamsPassThrough:
         assert store._max_steps == 5  # noqa: SLF001
         assert store._max_history_tokens == 10000  # noqa: SLF001
         assert store._max_kept_full == 2  # noqa: SLF001
+
+    def test_init_with_agent_runtime(self, tmp_path):
+        """init 消息带 agent_runtime → store.configure 收到。"""
+        store = SessionStore()
+        store._sessions_dir = str(tmp_path / ".sessions")  # noqa: SLF001
+
+        import agent.main as main_mod
+        main_mod._handle_init(store, {
+            "workspace": str(tmp_path),
+            "api_key": "sk-x",
+            "agent_runtime": "langchain",
+        })
+
+        assert store._agent_runtime == "langchain"  # noqa: SLF001
 
     def test_init_without_tuning_params_uses_defaults(self, tmp_path):
         """init 不带调优参数 → store 用 None（建 loop 时取默认值）。"""

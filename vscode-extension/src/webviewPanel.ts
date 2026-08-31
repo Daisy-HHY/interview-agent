@@ -44,6 +44,14 @@ function getDebugChannel(): OutputChannel {
   return debugChannel;
 }
 
+function writeDebugLine(message: string, show = false): void {
+  const logger = getDebugChannel();
+  if (show) {
+    logger.show(true);
+  }
+  logger.appendLine(`${new Date().toISOString()} ${message}`);
+}
+
 /** 从配置构造 AgentClient 需要的参数。 */
 export interface PanelOptions {
   pythonPath: string;
@@ -68,6 +76,7 @@ export interface PanelOptions {
   maxSteps?: number;
   maxHistoryTokens?: number;
   maxKeptFull?: number;
+  agentRuntime?: "native" | "langchain";
 }
 
 /** 发给 Webview 的配置快照；不回传 API Key 明文。 */
@@ -130,6 +139,9 @@ interface DisplayMessage {
 }
 
 const RESUME_MAX_CHARS = 80_000;
+const RESUME_PARSE_TIMEOUT_MS = 150_000;
+const PDF_TEXT_PARSE_TIMEOUT_MS = 8_000;
+const PDF_TEXT_FALLBACK_TIMEOUT_MS = 20_000;
 
 interface ReportInput {
   sessionId: string;
@@ -251,6 +263,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
         return;
       }
       if (msg.type === "pickResume") {
+        writeDebugLine("[resume-debug] received pickResume");
         void this.pickResume(webview);
         return;
       }
@@ -264,11 +277,16 @@ export class InterviewViewProvider implements WebviewViewProvider {
       }
       if (msg.type === "pickResumePath") {
         this.resumeDropArmedUntil = 0;
-        void this.parsePickedResume(webview, msg.path);
+        writeDebugLine(`[resume-debug] received pickResumePath path=${msg.path}`, true);
+        void this.parsePickedResume(webview, msg.path, "drop-path");
         return;
       }
       if (msg.type === "pickResumeUpload") {
         this.resumeDropArmedUntil = 0;
+        writeDebugLine(
+          `[resume-debug] received pickResumeUpload file=${msg.fileName} base64Chars=${msg.dataBase64.length}`,
+          true,
+        );
         void this.parseUploadedResume(webview, msg.fileName, msg.dataBase64);
         return;
       }
@@ -320,26 +338,44 @@ export class InterviewViewProvider implements WebviewViewProvider {
 
   /** 通过 VS Code 文件选择器读取简历附件。 */
   private async pickResume(webview: Webview): Promise<void> {
-    const selected = await window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: false,
-      filters: {
-        "简历文件": ["pdf", "docx", "txt", "md", "markdown", "png", "jpg", "jpeg", "webp"],
-      },
-      title: "选择简历文件",
-    });
+    writeDebugLine("[resume-debug] opening VS Code file dialog", true);
+    let selected: Uri[] | undefined;
+    try {
+      selected = await window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        filters: {
+          "简历文件": ["pdf", "docx", "txt", "md", "markdown", "png", "jpg", "jpeg", "webp"],
+        },
+        title: "选择简历文件",
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      writeDebugLine(`[resume-debug] file dialog failed error=${message}`, true);
+      void webview.postMessage({
+        type: "resumeError",
+        message: `打开文件选择器失败：${message}`,
+      });
+      return;
+    }
     const file = selected?.[0];
     if (!file) {
+      writeDebugLine("[resume-debug] file dialog canceled");
       return;
     }
 
-    await this.parsePickedResume(webview, file.fsPath);
+    writeDebugLine(`[resume-debug] selected path=${file.fsPath}`, true);
+    await this.parsePickedResume(webview, file.fsPath, "dialog");
   }
 
   /** 读取用户选择或拖入的简历附件。 */
-  private async parsePickedResume(webview: Webview, filePath: string): Promise<void> {
-    await this.parseResumePath(webview, filePath);
+  private async parsePickedResume(
+    webview: Webview,
+    filePath: string,
+    source = "picked",
+  ): Promise<void> {
+    await this.parseResumePath(webview, filePath, undefined, source);
   }
 
   /** 读取 Webview 拖拽传来的简历内容，写入临时文件后复用原解析流程。 */
@@ -353,10 +389,15 @@ export class InterviewViewProvider implements WebviewViewProvider {
     const filePath = join(dir, `${Date.now()}-${safeName}`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(filePath, Buffer.from(stripDataUrlPrefix(dataBase64), "base64"));
+    writeDebugLine(
+      `[resume-debug] wrote dropped temp file path=${filePath} bytes=${safeStatSize(filePath)}`,
+      true,
+    );
     try {
-      await this.parseResumePath(webview, filePath, safeName);
+      await this.parseResumePath(webview, filePath, safeName, "drop-upload");
     } finally {
       rmSync(filePath, { force: true });
+      writeDebugLine(`[resume-debug] removed dropped temp file path=${filePath}`);
     }
   }
 
@@ -364,6 +405,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
     webview: Webview,
     filePath: string,
     displayFileName?: string,
+    source = "unknown",
   ): Promise<void> {
     const options = this.buildOptions();
     const pythonLookup = locatePython({
@@ -372,31 +414,57 @@ export class InterviewViewProvider implements WebviewViewProvider {
       vscodePythonPath: options.vscodePythonPath,
       requireOpenAI: false,
     });
+    const startedAt = Date.now();
+    const ext = extname(filePath).toLowerCase() || "unknown";
+    writeDebugLine(
+      `[resume-debug] parse start source=${source} path=${filePath} ext=${ext} bytes=${safeStatSize(filePath)} python=${pythonLookup.pythonPath}`,
+      true,
+    );
     try {
       void webview.postMessage({ type: "resumeStatus", message: "正在读取简历..." });
-      const resume = await parseResumeFile(filePath, {
-        ocr: (ocrPath) => runResumeOcr({
-          filePath: ocrPath,
-          pythonPath: pythonLookup.pythonPath,
-          scriptPath: join(options.pythonPathRoot, "agent", "resume_ocr.py"),
-          pythonPathRoot: options.pythonPathRoot,
-          onProgress: (progress) => {
-            void webview.postMessage({ type: "resumeOcrProgress", progress });
+      const resume = await withResumeParseTimeout(
+        parseResumeFile(filePath, {
+          ocr: (ocrPath) => runResumeOcr({
+            filePath: ocrPath,
+            pythonPath: pythonLookup.pythonPath,
+            scriptPath: join(options.pythonPathRoot, "agent", "resume_ocr.py"),
+            pythonPathRoot: options.pythonPathRoot,
+            onProgress: (progress) => {
+              void webview.postMessage({ type: "resumeOcrProgress", progress });
+            },
+          }),
+          pdfTextFallback: (pdfPath, reason) => runResumePdfText({
+            filePath: pdfPath,
+            pythonPath: pythonLookup.pythonPath,
+            pythonPathRoot: options.pythonPathRoot,
+            reason,
+          }),
+          onStatus: (message) => {
+            writeDebugLine(`[resume-debug] status ${message}`);
+            void webview.postMessage({ type: "resumeStatus", message });
+          },
+          onDebug: (message) => {
+            writeDebugLine(`[resume-debug] ${message}`);
           },
         }),
-        onStatus: (message) => {
-          void webview.postMessage({ type: "resumeStatus", message });
-        },
-      });
+      );
       if (displayFileName) {
         resume.fileName = displayFileName;
       }
+      writeDebugLine(
+        `[resume-debug] parse success file=${resume.fileName} chars=${resume.content.length} truncated=${resume.truncated} elapsedMs=${Date.now() - startedAt}`,
+        true,
+      );
       void webview.postMessage({
         type: "resumePicked",
         resume,
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      writeDebugLine(
+        `[resume-debug] parse failed path=${filePath} elapsedMs=${Date.now() - startedAt} error=${message}`,
+        true,
+      );
       if (isOcrDependencyError(message)) {
         this.postOcrDependencyError(webview, message, pythonLookup.pythonPath);
         return;
@@ -723,7 +791,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
       logger.appendLine(line);
     }
     logger.appendLine(
-      `[llm] ${options.demoMode ? "Demo Mode（固定脚本）" : "真实模型"} model=${options.model} baseUrl=${options.baseUrl || "OpenAI 默认"}`,
+      `[llm] ${options.demoMode ? "Demo Mode（固定脚本）" : "真实模型"} model=${options.model} baseUrl=${options.baseUrl || "OpenAI 默认"} runtime=${options.agentRuntime || "native"}`,
     );
     if (!options.demoMode && pythonLookup.error) {
       this.postDependencyError(webview, pythonLookup.error, pythonLookup.pythonPath);
@@ -749,6 +817,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
       maxSteps: options.maxSteps,
       maxHistoryTokens: options.maxHistoryTokens,
       maxKeptFull: options.maxKeptFull,
+      agentRuntime: options.agentRuntime,
     });
     this.wireAgent(webview);
     this.agent.start();
@@ -871,8 +940,11 @@ export class InterviewViewProvider implements WebviewViewProvider {
 
 interface ResumeParseOptions {
   onStatus?: (message: string) => void;
+  onDebug?: (message: string) => void;
   ocr?: (filePath: string) => Promise<string>;
   pdfText?: (filePath: string) => Promise<string>;
+  pdfTextFallback?: (filePath: string, reason: string) => Promise<string>;
+  pdfTextTimeoutMs?: number;
 }
 
 interface ResumeOcrProgress {
@@ -891,57 +963,152 @@ interface ResumeOcrInput {
   onProgress?: (progress: ResumeOcrProgress) => void;
 }
 
+interface ResumePdfTextInput {
+  filePath: string;
+  pythonPath: string;
+  pythonPathRoot: string;
+  reason: string;
+}
+
 /** 读取并解析简历附件，返回可注入首轮上下文的纯文本。 */
 export async function parseResumeFile(
   filePath: string,
   options: ResumeParseOptions = {},
 ): Promise<ResumeParseResult> {
   const ext = extname(filePath).toLowerCase();
+  const startedAt = Date.now();
+  options.onDebug?.(
+    `parseResumeFile start file=${basename(filePath)} ext=${ext || "unknown"} bytes=${safeStatSize(filePath)}`,
+  );
   let raw = "";
 
   if ([".txt", ".md", ".markdown"].includes(ext)) {
     raw = readFileSync(filePath, "utf-8");
+    options.onDebug?.(`text read chars=${raw.length} elapsedMs=${Date.now() - startedAt}`);
   } else if (ext === ".docx") {
+    options.onDebug?.("docx import mammoth start");
     const mammoth = await import("mammoth");
+    options.onDebug?.("docx extractRawText start");
     const result = await mammoth.extractRawText({ path: filePath });
     raw = result.value;
+    options.onDebug?.(`docx extractRawText done chars=${raw.length} elapsedMs=${Date.now() - startedAt}`);
   } else if (ext === ".pdf") {
-    if (options.pdfText) {
-      raw = await options.pdfText(filePath);
-    } else {
-      const pdfParse = await importPdfParse();
-      const result = await pdfParse(readFileSync(filePath));
-      raw = result.text;
+    try {
+      raw = await readPdfTextLayer(filePath, options, startedAt);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      options.onDebug?.(`pdf primary text extraction failed reason=${reason}`);
+      if (!options.pdfTextFallback) {
+        throw e;
+      }
+      options.onStatus?.("正在使用备用 PDF 解析...");
+      options.onDebug?.("pdf fallback text extractor start");
+      raw = await options.pdfTextFallback(filePath, reason);
+      options.onDebug?.(`pdf fallback text extractor done chars=${raw.length} elapsedMs=${Date.now() - startedAt}`);
     }
     if (!raw.trim()) {
       if (!options.ocr) {
+        options.onDebug?.("pdf text empty and OCR handler missing");
         throw new Error(
           "扫描版 PDF 需要 OCR 依赖。请安装 OCR 依赖，或改用文本粘贴。",
         );
       }
       options.onStatus?.("正在识别扫描版 PDF...");
+      options.onDebug?.("pdf text empty, OCR start");
       raw = await options.ocr(filePath);
+      options.onDebug?.(`pdf OCR done chars=${raw.length} elapsedMs=${Date.now() - startedAt}`);
     }
   } else if (isSupportedResumeImageExt(ext)) {
     if (!options.ocr) {
+      options.onDebug?.("image OCR handler missing");
       throw new Error("图片简历需要 OCR 依赖。请安装 OCR 依赖，或改用文本粘贴。");
     }
     options.onStatus?.("正在识别图片简历...");
+    options.onDebug?.("image OCR start");
     raw = await options.ocr(filePath);
+    options.onDebug?.(`image OCR done chars=${raw.length} elapsedMs=${Date.now() - startedAt}`);
   } else {
+    options.onDebug?.(`unsupported file ext=${ext || "unknown"}`);
     throw new Error("当前只支持 .pdf、.docx、.txt、.md、.markdown、.png、.jpg、.jpeg、.webp 简历。");
   }
 
   const normalized = raw.trim();
   if (!normalized) {
+    options.onDebug?.(`normalized text empty elapsedMs=${Date.now() - startedAt}`);
     throw new Error("未从简历附件中提取到文字内容。扫描版 PDF 或图片请改用文本粘贴。");
   }
+  options.onDebug?.(
+    `parseResumeFile done chars=${normalized.length} truncated=${normalized.length > RESUME_MAX_CHARS} elapsedMs=${Date.now() - startedAt}`,
+  );
 
   return {
     fileName: basename(filePath),
     content: normalized.slice(0, RESUME_MAX_CHARS),
     truncated: normalized.length > RESUME_MAX_CHARS,
   };
+}
+
+async function readPdfTextLayer(
+  filePath: string,
+  options: ResumeParseOptions,
+  startedAt: number,
+): Promise<string> {
+  const timeoutMs = options.pdfTextTimeoutMs ?? PDF_TEXT_PARSE_TIMEOUT_MS;
+  if (options.pdfText) {
+    options.onDebug?.("pdf custom text extractor start");
+    const text = await withPdfTextTimeout(options.pdfText(filePath), timeoutMs);
+    options.onDebug?.(`pdf custom text extractor done chars=${text.length} elapsedMs=${Date.now() - startedAt}`);
+    return text;
+  }
+
+  options.onDebug?.("pdf import pdf-parse start");
+  const pdfParse = await importPdfParse();
+  options.onDebug?.("pdf read file start");
+  const pdfBuffer = readFileSync(filePath);
+  options.onDebug?.(`pdf read file done bytes=${pdfBuffer.length}`);
+  options.onDebug?.("pdf text extraction start");
+  const result = await withPdfTextTimeout(pdfParse(pdfBuffer), timeoutMs);
+  options.onDebug?.(`pdf text extraction done chars=${result.text.length} elapsedMs=${Date.now() - startedAt}`);
+  return result.text;
+}
+
+function withPdfTextTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`PDF 文字层解析超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+export function withResumeParseTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs = RESUME_PARSE_TIMEOUT_MS,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error("读取简历超时。请换用更小或更清晰的文件，或改用文本粘贴。"));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+function safeStatSize(filePath: string): string {
+  try {
+    return String(statSync(filePath).size);
+  } catch {
+    return "unknown";
+  }
 }
 
 async function importPdfParse(): Promise<(data: Buffer) => Promise<{ text: string }>> {
@@ -969,6 +1136,76 @@ function quotePowerShell(value: string): string {
 
 function quoteShell(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export async function runResumePdfText(input: ResumePdfTextInput): Promise<string> {
+  const { execFile } = await import("child_process");
+  const startedAt = Date.now();
+  const logger = getDebugChannel();
+  logger.appendLine(
+    `[pdf-text] fallback start file=${basename(input.filePath)} reason=${input.reason}`,
+  );
+  const code = [
+    "import sys",
+    "path = sys.argv[1]",
+    "try:",
+    "    import pymupdf as fitz",
+    "except ModuleNotFoundError:",
+    "    try:",
+    "        import fitz",
+    "    except ModuleNotFoundError:",
+    "        sys.stderr.write('PDF 备用解析依赖未安装：PyMuPDF。请点击“安装 OCR 依赖”后重试。')",
+    "        raise SystemExit(3)",
+    "max_chars = 100000",
+    "parts = []",
+    "total = 0",
+    "with fitz.open(path) as doc:",
+    "    for page in doc:",
+    "        text = page.get_text()",
+    "        parts.append(text)",
+    "        total += len(text)",
+    "        if total >= max_chars:",
+    "            break",
+    "sys.stdout.write('\\n'.join(parts)[:max_chars])",
+  ].join("\n");
+
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    const existing = env.PYTHONPATH ?? "";
+    env.PYTHONPATH = existing
+      ? `${input.pythonPathRoot}${process.platform === "win32" ? ";" : ":"}${existing}`
+      : input.pythonPathRoot;
+    env.PYTHONIOENCODING = "utf-8";
+
+    execFile(
+      input.pythonPath,
+      ["-c", code, input.filePath],
+      {
+        encoding: "utf-8",
+        env,
+        timeout: PDF_TEXT_FALLBACK_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: RESUME_MAX_CHARS * 8,
+      },
+      (error, stdout, stderr) => {
+        const elapsedMs = Date.now() - startedAt;
+        const detail = stderr.trim();
+        if (detail) {
+          logger.appendLine(`[pdf-text] stderr ${detail}`);
+        }
+        if (error) {
+          logger.appendLine(`[pdf-text] failed elapsedMs=${elapsedMs}`);
+          reject(new Error(
+            `PDF 备用解析失败。${detail ? `\n${detail}` : `\n${error.message}`}`,
+          ));
+          return;
+        }
+        const text = stdout.trim();
+        logger.appendLine(`[pdf-text] success chars=${text.length} elapsedMs=${elapsedMs}`);
+        resolve(text);
+      },
+    );
+  });
 }
 
 async function runResumeOcr(input: ResumeOcrInput): Promise<string> {
@@ -1141,6 +1378,7 @@ async function runModelConnectionTest(input: ModelTestInput): Promise<ModelTestR
 
 function isOcrDependencyError(message: string): boolean {
   return message.includes("OCR 依赖")
+    || message.includes("PyMuPDF")
     || message.includes("rapidocr")
     || message.includes("onnxruntime");
 }

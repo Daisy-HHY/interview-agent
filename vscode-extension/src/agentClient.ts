@@ -44,6 +44,8 @@ export interface AgentClientOptions {
   maxSteps?: number;
   maxHistoryTokens?: number;
   maxKeptFull?: number;
+  /** Agent runtime：默认 native，可切换 langchain。 */
+  agentRuntime?: "native" | "langchain";
   /**
    * 演示模式（设计第 5E 节冒烟）：true 时用 FakeLLM 代替真实 API，
    * 零费用跑完整闭环，展示面试官对话/工具气泡/流式效果。
@@ -103,7 +105,9 @@ export class AgentClient {
       this.log("[demo] 演示模式：使用 FakeLLM，不调用真实 API");
     } else {
       delete env.INTERVIEW_FAKE_LLM;
-      this.log("[llm] 真实模式：调用配置的 OpenAI 兼容模型");
+      this.log(
+        `[llm] 真实模式：调用配置的 OpenAI 兼容模型，runtime=${this.options.agentRuntime || "native"}`,
+      );
     }
 
     // -u：无缓冲，确保流式通知实时推出（设计第 1.6 节缓冲区陷阱）
@@ -132,6 +136,7 @@ export class AgentClient {
       max_steps: this.options.maxSteps,
       max_history_tokens: this.options.maxHistoryTokens,
       max_kept_full: this.options.maxKeptFull,
+      agent_runtime: this.options.agentRuntime || "native",
     }));
   }
 

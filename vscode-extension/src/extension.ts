@@ -35,6 +35,7 @@ interface InterviewConfig {
   maxSteps: number;
   maxHistoryTokens: number;
   maxKeptFull: number;
+  agentRuntime: "native" | "langchain";
 }
 
 function readConfig(): InterviewConfig {
@@ -49,6 +50,7 @@ function readConfig(): InterviewConfig {
     maxSteps: cfg.get<number>("maxSteps", 8),
     maxHistoryTokens: cfg.get<number>("maxHistoryTokens", 20000),
     maxKeptFull: cfg.get<number>("maxKeptFull", 3),
+    agentRuntime: cfg.get<"native" | "langchain">("agentRuntime", "native"),
   };
 }
 
@@ -88,6 +90,7 @@ function buildPanelOptions(context: ExtensionContext): PanelOptions {
     maxSteps: cfg.maxSteps,
     maxHistoryTokens: cfg.maxHistoryTokens,
     maxKeptFull: cfg.maxKeptFull,
+    agentRuntime: cfg.agentRuntime,
   };
 }
 

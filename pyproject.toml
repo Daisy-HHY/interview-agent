@@ -26,6 +26,11 @@ ocr = [
     "rapidocr>=3.9,<4", # 本地 OCR 引擎
     "onnxruntime>=1.18", # RapidOCR 默认 ONNX 推理后端
 ]
+agent-framework = [
+    "langchain>=1.0,<2",
+    "langchain-openai>=1.0,<2",
+    "langgraph>=1.0,<2",
+]
 
 # ──────────────────────────────────────────────
 # pytest 配置

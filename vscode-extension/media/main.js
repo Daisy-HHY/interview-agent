@@ -45,6 +45,10 @@
   let resumeCaptureEnabled = null;
   let workspaceState = { hasWorkspace: false, workspaceName: "", workspacePath: "" };
 
+  function logResumeDebug(message, detail) {
+    console.info("[resume-debug]", message, detail || "");
+  }
+
   function setAwaiting(value) {
     awaiting = value;
     updateActionButton();
@@ -151,6 +155,11 @@
       return;
     }
     if (msg.type === "resumePicked") {
+      logResumeDebug("resumePicked", {
+        fileName: msg.resume?.fileName,
+        chars: msg.resume?.content?.length,
+        truncated: msg.resume?.truncated,
+      });
       resumeAttachment = msg.resume;
       resumeFileEl.textContent = msg.resume.truncated
         ? `${msg.resume.fileName}（已截取前 80000 字）`
@@ -159,14 +168,17 @@
       return;
     }
     if (msg.type === "resumeStatus") {
+      logResumeDebug("resumeStatus", msg.message || "");
       setStatus(msg.message || "");
       return;
     }
     if (msg.type === "resumeOcrProgress") {
+      logResumeDebug("resumeOcrProgress", msg.progress);
       setStatus(formatOcrProgress(msg.progress));
       return;
     }
     if (msg.type === "resumeError") {
+      logResumeDebug("resumeError", msg.message || "");
       appendBubble("error", "出错了", msg.message || "读取简历失败");
       setStatus("");
       return;
@@ -773,10 +785,19 @@
     }
     resumeFileInputEl.value = "";
   });
+  pickResumeBtn.addEventListener("click", (event) => {
+    if (event.target === resumeFileInputEl) {
+      return;
+    }
+    event.preventDefault();
+    logResumeDebug("click pickResume");
+    vscode.postMessage({ type: "pickResume" });
+  });
   pickResumeBtn.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      resumeFileInputEl.click();
+      logResumeDebug("keyboard pickResume", event.key);
+      vscode.postMessage({ type: "pickResume" });
     }
   });
   [pickResumeBtn, resumeFileInputEl].forEach((dropTarget) => {
@@ -882,13 +903,20 @@
     pickResumeBtn.classList.remove("is-dragover");
     const payload = getDroppedResumePayload(event);
     if (!payload) {
+      logResumeDebug("drop payload missing", Array.from(event.dataTransfer?.types || []));
       setStatus("没有识别到拖拽文件，请拖入单个简历文件，或点击上传区域选择文件。");
       return;
     }
     if (payload.type === "file") {
+      logResumeDebug("drop file payload", {
+        name: payload.file.name,
+        size: payload.file.size,
+        type: payload.file.type,
+      });
       readDroppedResume(payload.file);
       return;
     }
+    logResumeDebug("drop path payload", payload.path);
     setStatus("正在读取拖拽文件...");
     vscode.postMessage({ type: "pickResumePath", path: payload.path });
   }
@@ -988,6 +1016,7 @@
 
   function readDroppedResume(file) {
     if (file.size > DROPPED_RESUME_MAX_BYTES) {
+      logResumeDebug("drop file too large", { name: file.name, size: file.size });
       setStatus("简历文件超过 10MB，请点击上传区域选择文件。");
       return;
     }
@@ -995,6 +1024,11 @@
     reader.onload = () => {
       const dataUrl = String(reader.result || "");
       const dataBase64 = dataUrl.includes(",") ? dataUrl.split(",").pop() : dataUrl;
+      logResumeDebug("drop file read done", {
+        name: file.name,
+        size: file.size,
+        base64Chars: dataBase64.length,
+      });
       vscode.postMessage({
         type: "pickResumeUpload",
         fileName: file.name,
@@ -1002,8 +1036,10 @@
       });
     };
     reader.onerror = () => {
+      logResumeDebug("drop file read failed", { name: file.name, size: file.size });
       setStatus("拖拽文件读取失败，请点击上传区域选择文件。");
     };
+    logResumeDebug("drop file read start", { name: file.name, size: file.size });
     setStatus("正在读取拖拽文件...");
     reader.readAsDataURL(file);
   }
