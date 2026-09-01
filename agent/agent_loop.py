@@ -4,6 +4,7 @@
 要么直接回答。调工具就把结果塞回对话历史，让 LLM 再想下一步。
 """
 
+import time
 from typing import Any, Callable
 
 from agent.history import compress_history, enforce_token_limit
@@ -66,14 +67,25 @@ class AgentLoop:
         self._max_steps = max_steps
         self._max_history_tokens = max_history_tokens
         self._max_kept_full = max_kept_full
+        self._last_model_elapsed_ms = 0
         # 对话历史：整个 session 复用一份
         # 第一条永远是系统提示（设计第 6.2.3 节：永不删除）
         self._messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
     @property
+    def runtime_name(self) -> str:
+        """返回实际运行的 runtime 名称。"""
+        return "native"
+
+    @property
     def messages(self) -> list[dict]:
         """暴露历史（Phase 5 落盘用）。"""
         return self._messages
+
+    @property
+    def last_model_elapsed_ms(self) -> int:
+        """返回最近一轮模型请求累计耗时。"""
+        return self._last_model_elapsed_ms
     
 
     def run(
@@ -102,6 +114,7 @@ class AgentLoop:
             if should_cancel is not None and should_cancel():
                 raise AgentCancelled(partial)
 
+        self._last_model_elapsed_ms = 0
         check_cancel()
         # 把用户消息加入历史
         self._messages.append({"role": "user", "content": user_text})
@@ -123,6 +136,7 @@ class AgentLoop:
                 self._messages = enforce_token_limit(self._messages)
 
             # ── 调 LLM（传 on_delta 启用流式，Phase 7-C）──
+            model_started = time.perf_counter()
             try:
                 response = self._llm.chat(
                     self._messages,
@@ -130,9 +144,20 @@ class AgentLoop:
                     on_delta=on_delta,
                     should_cancel=should_cancel,
                 )
+                self._last_model_elapsed_ms += int(
+                    (time.perf_counter() - model_started) * 1000
+                )
             except AgentCancelled as e:
+                self._last_model_elapsed_ms += int(
+                    (time.perf_counter() - model_started) * 1000
+                )
                 if e.partial:
                     self._messages.append({"role": "assistant", "content": e.partial})
+                raise
+            except Exception:
+                self._last_model_elapsed_ms += int(
+                    (time.perf_counter() - model_started) * 1000
+                )
                 raise
 
             if response.tool_calls:

@@ -109,6 +109,11 @@ def notify_tool_call(
     notify("tool_call", params)
 
 
+def notify_runtime_metric(session: str, metric: dict) -> None:
+    """运行指标通知：展示最近一轮 runtime、耗时、工具和错误分类。"""
+    notify("runtime_metric", {"session": session, **metric})
+
+
 def notify_done(session: str) -> None:
     """本轮 Agent 循环结束（设计第 1.5.3 节时序末尾）。"""
     notify("done", {"session": session})

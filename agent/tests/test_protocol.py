@@ -174,6 +174,29 @@ class TestNotify:
         assert msg["params"]["phase"] == "end"
         assert msg["params"]["result"] == "找到3处"
 
+    def test_notify_runtime_metric(self, monkeypatch):
+        """运行指标通知不携带正文，只携带耗时和统计字段。"""
+        written = []
+        monkeypatch.setattr(protocol.sys.stdout, "write", written.append)
+        monkeypatch.setattr(protocol.sys.stdout, "flush", lambda: None)
+
+        protocol.notify_runtime_metric("s1", {
+            "runtime": "native",
+            "status": "done",
+            "model_elapsed_ms": 12,
+            "first_delta_ms": 3,
+            "total_elapsed_ms": 15,
+            "estimated_tokens": 20,
+            "error_kind": None,
+            "tools": [{"tool": "read_file", "elapsed_ms": 2, "result_chars": 8}],
+        })
+
+        msg = json.loads(written[0])
+        assert msg["method"] == "runtime_metric"
+        assert msg["params"]["session"] == "s1"
+        assert msg["params"]["runtime"] == "native"
+        assert msg["params"]["tools"][0]["result_chars"] == 8
+
     def test_notify_done(self, monkeypatch):
         """完成通知。"""
         written = []

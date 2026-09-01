@@ -47,7 +47,8 @@ describe("Webview 面试入口模板", () => {
     expect(script).toContain('pickResumeBtn.addEventListener("click"');
     expect(script).toContain("event.preventDefault()");
     expect(script).toContain('vscode.postMessage({ type: "pickResume" })');
-    expect(script).toContain('console.info("[resume-debug]"');
+    expect(script).not.toContain('console.info("[resume-debug]"');
+    expect(panelSource).toContain("[resume]");
     expect(script).toContain("function onResumeDrag");
     expect(script).toContain("function armResumeFileDrop");
     expect(script).toContain('"armResumeFileDrop"');
@@ -160,6 +161,16 @@ describe("Webview 面试入口模板", () => {
     expect(html).not.toContain('id="saveConfig"');
     expect(script).not.toContain("function saveConfig");
     expect(script).not.toContain('type: "updateConfig"');
+  });
+
+  it("首屏包含 runtime 诊断面板并展示 runtime 配置", () => {
+    expect(html).toContain('id="runtimeDiagnostics"');
+    expect(html).toContain("诊断");
+    expect(script).toContain('case "runtime_metric"');
+    expect(script).toContain("function renderRuntimeMetric");
+    expect(script).toContain("metric.model_elapsed_ms");
+    expect(script).toContain("config.agentRuntime");
+    expect(styles).toContain(".diagnostics__body");
   });
 
   it("包含依赖安装和历史会话入口", () => {

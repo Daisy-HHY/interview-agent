@@ -84,6 +84,7 @@ export interface WebviewConfigSnapshot {
   model: string;
   baseUrl: string;
   demoMode: boolean;
+  agentRuntime: "native" | "langchain";
   hasApiKey: boolean;
   workspaceName: string;
   workspacePath: string;
@@ -172,6 +173,8 @@ export class InterviewViewProvider implements WebviewViewProvider {
   private sessionId = makeSessionId();
   private resumeDropArmedUntil = 0;
   private resumeCaptureReady = true;
+  private agentBusy = false;
+  private pendingAgentRestart = false;
 
   constructor(
     private readonly htmlBasePath: Uri,
@@ -249,6 +252,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
           return;
         }
         const attached = this.readSelection();
+        this.agentBusy = true;
         this.agent?.send(
           buildChat({
             session: this.sessionId,
@@ -263,7 +267,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
         return;
       }
       if (msg.type === "pickResume") {
-        writeDebugLine("[resume-debug] received pickResume");
+        writeDebugLine("[resume] received pickResume");
         void this.pickResume(webview);
         return;
       }
@@ -277,14 +281,14 @@ export class InterviewViewProvider implements WebviewViewProvider {
       }
       if (msg.type === "pickResumePath") {
         this.resumeDropArmedUntil = 0;
-        writeDebugLine(`[resume-debug] received pickResumePath path=${msg.path}`, true);
+        writeDebugLine(`[resume] received pickResumePath path=${msg.path}`, true);
         void this.parsePickedResume(webview, msg.path, "drop-path");
         return;
       }
       if (msg.type === "pickResumeUpload") {
         this.resumeDropArmedUntil = 0;
         writeDebugLine(
-          `[resume-debug] received pickResumeUpload file=${msg.fileName} base64Chars=${msg.dataBase64.length}`,
+          `[resume] received pickResumeUpload file=${msg.fileName} base64Chars=${msg.dataBase64.length}`,
           true,
         );
         void this.parseUploadedResume(webview, msg.fileName, msg.dataBase64);
@@ -338,7 +342,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
 
   /** 通过 VS Code 文件选择器读取简历附件。 */
   private async pickResume(webview: Webview): Promise<void> {
-    writeDebugLine("[resume-debug] opening VS Code file dialog", true);
+    writeDebugLine("[resume] opening VS Code file dialog", true);
     let selected: Uri[] | undefined;
     try {
       selected = await window.showOpenDialog({
@@ -352,7 +356,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      writeDebugLine(`[resume-debug] file dialog failed error=${message}`, true);
+      writeDebugLine(`[resume] file dialog failed error=${message}`, true);
       void webview.postMessage({
         type: "resumeError",
         message: `打开文件选择器失败：${message}`,
@@ -361,11 +365,11 @@ export class InterviewViewProvider implements WebviewViewProvider {
     }
     const file = selected?.[0];
     if (!file) {
-      writeDebugLine("[resume-debug] file dialog canceled");
+      writeDebugLine("[resume] file dialog canceled");
       return;
     }
 
-    writeDebugLine(`[resume-debug] selected path=${file.fsPath}`, true);
+    writeDebugLine(`[resume] selected path=${file.fsPath}`, true);
     await this.parsePickedResume(webview, file.fsPath, "dialog");
   }
 
@@ -390,14 +394,14 @@ export class InterviewViewProvider implements WebviewViewProvider {
     mkdirSync(dir, { recursive: true });
     writeFileSync(filePath, Buffer.from(stripDataUrlPrefix(dataBase64), "base64"));
     writeDebugLine(
-      `[resume-debug] wrote dropped temp file path=${filePath} bytes=${safeStatSize(filePath)}`,
+      `[resume] wrote dropped temp file path=${filePath} bytes=${safeStatSize(filePath)}`,
       true,
     );
     try {
       await this.parseResumePath(webview, filePath, safeName, "drop-upload");
     } finally {
       rmSync(filePath, { force: true });
-      writeDebugLine(`[resume-debug] removed dropped temp file path=${filePath}`);
+      writeDebugLine(`[resume] removed dropped temp file path=${filePath}`);
     }
   }
 
@@ -417,7 +421,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
     const startedAt = Date.now();
     const ext = extname(filePath).toLowerCase() || "unknown";
     writeDebugLine(
-      `[resume-debug] parse start source=${source} path=${filePath} ext=${ext} bytes=${safeStatSize(filePath)} python=${pythonLookup.pythonPath}`,
+      `[resume] parse start source=${source} path=${filePath} ext=${ext} bytes=${safeStatSize(filePath)} python=${pythonLookup.pythonPath}`,
       true,
     );
     try {
@@ -440,11 +444,11 @@ export class InterviewViewProvider implements WebviewViewProvider {
             reason,
           }),
           onStatus: (message) => {
-            writeDebugLine(`[resume-debug] status ${message}`);
+            writeDebugLine(`[resume] status ${message}`);
             void webview.postMessage({ type: "resumeStatus", message });
           },
           onDebug: (message) => {
-            writeDebugLine(`[resume-debug] ${message}`);
+            writeDebugLine(`[resume] ${message}`);
           },
         }),
       );
@@ -452,7 +456,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
         resume.fileName = displayFileName;
       }
       writeDebugLine(
-        `[resume-debug] parse success file=${resume.fileName} chars=${resume.content.length} truncated=${resume.truncated} elapsedMs=${Date.now() - startedAt}`,
+        `[resume] parse success file=${resume.fileName} chars=${resume.content.length} truncated=${resume.truncated} elapsedMs=${Date.now() - startedAt}`,
         true,
       );
       void webview.postMessage({
@@ -462,7 +466,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       writeDebugLine(
-        `[resume-debug] parse failed path=${filePath} elapsedMs=${Date.now() - startedAt} error=${message}`,
+        `[resume] parse failed path=${filePath} elapsedMs=${Date.now() - startedAt} error=${message}`,
         true,
       );
       if (isOcrDependencyError(message)) {
@@ -715,7 +719,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
   }
 
   /**
-   * 保存模型配置并重启 Agent。
+   * 保存模型配置，并让下一轮对话使用新配置。
    *
    * 参数：
    * - config：Webview 发来的模型名、Base URL、API Key 或 Demo Mode 更新
@@ -727,8 +731,12 @@ export class InterviewViewProvider implements WebviewViewProvider {
   ): Promise<void> {
     try {
       await this.saveConfig(config);
-      this.restartAgent();
       this.postConfig(webview);
+      if (this.agentBusy) {
+        this.pendingAgentRestart = true;
+      } else {
+        this.restartAgent();
+      }
       void webview.postMessage({ type: "configSaved" });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -737,6 +745,23 @@ export class InterviewViewProvider implements WebviewViewProvider {
         params: { session: this.sessionId, message: `保存配置失败：${message}` },
       });
     }
+  }
+
+  /** Settings 变更后刷新快照；当前回答生成中时延迟重启 Agent。 */
+  refreshConfigFromSettings(): void {
+    const webview = this.view?.webview;
+    if (webview) {
+      this.postConfig(webview);
+    }
+    if (!this.agent) {
+      return;
+    }
+    if (this.agentBusy) {
+      this.pendingAgentRestart = true;
+      writeDebugLine("[config] Settings 已变更，当前回答结束后重启 Agent。");
+      return;
+    }
+    this.restartAgent();
   }
 
   /** 按当前配置懒启动 Python Agent；无 API Key 时阻止真实调用。 */
@@ -833,22 +858,36 @@ export class InterviewViewProvider implements WebviewViewProvider {
 
     this.agent?.onNotification((n) => {
       void webview.postMessage({ method: n.method, params: n.params });
-      if (n.method === "done" || n.method === "cancelled") {
+      if (n.method === "done" || n.method === "cancelled" || n.method === "error") {
+        this.agentBusy = false;
+      }
+      if (n.method === "done" || n.method === "cancelled" || n.method === "error") {
         this.postSessions(webview);
+        if (this.pendingAgentRestart) {
+          this.pendingAgentRestart = false;
+          this.restartAgent();
+        }
       }
     });
 
     this.agent?.onError((message) => {
+      this.agentBusy = false;
       logger.appendLine(`[error] ${message}`);
       void webview.postMessage({
         method: "error",
         params: { session: this.sessionId, message },
       });
+      if (this.pendingAgentRestart) {
+        this.pendingAgentRestart = false;
+        this.restartAgent();
+      }
     });
   }
 
   private restartAgent(): void {
     this.disposeAgent();
+    this.agentBusy = false;
+    this.pendingAgentRestart = false;
     this.sessionId = makeSessionId();
   }
 
@@ -863,6 +902,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
       model: options.model,
       baseUrl: options.baseUrl ?? "",
       demoMode: Boolean(options.demoMode),
+      agentRuntime: options.agentRuntime || "native",
       hasApiKey: Boolean(options.apiKey),
       workspaceName: options.workspaceName,
       workspacePath: options.workspace,

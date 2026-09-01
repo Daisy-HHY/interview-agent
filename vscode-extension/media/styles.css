@@ -405,6 +405,24 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.diagnostics {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-widget-border, transparent);
+  border-radius: 8px;
+}
+
+.diagnostics__body {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ──────────────────────────────────────────────
    简历上传区
    ────────────────────────────────────────────── */

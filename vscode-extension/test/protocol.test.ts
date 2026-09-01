@@ -121,6 +121,17 @@ describe("parse", () => {
     expect(n?.params.message).toBe("API 失效");
   });
 
+  it("解析 runtime_metric 通知", () => {
+    const n = parse(
+      '{"method":"runtime_metric","params":{"session":"s1","runtime":"native","status":"done","model_elapsed_ms":12,"first_delta_ms":3,"total_elapsed_ms":15,"estimated_tokens":20,"error_kind":null,"tools":[{"tool":"read_file","elapsed_ms":2,"args_keys":["path"],"result_chars":8}]}}',
+    );
+    expect(n?.method).toBe("runtime_metric");
+    if (n?.method === "runtime_metric") {
+      expect(n.params.runtime).toBe("native");
+      expect(n.params.tools?.[0].result_chars).toBe(8);
+    }
+  });
+
   it("容错：格式错误的 JSON 返回 null", () => {
     expect(parse("{not json}")).toBeNull();
     expect(parse("随机文字")).toBeNull();

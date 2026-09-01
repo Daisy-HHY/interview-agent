@@ -139,6 +139,11 @@ export function activate(context: ExtensionContext): void {
       provider.captureOpenedResumeTab(tab);
     }
   });
+  const configChanged = workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("interview")) {
+      provider.refreshConfigFromSettings();
+    }
+  });
 
   context.subscriptions.push(
     window.registerWebviewViewProvider("interview.chatView", provider, {
@@ -147,6 +152,7 @@ export function activate(context: ExtensionContext): void {
     startCmd,
     askCmd,
     captureDroppedResumeTab,
+    configChanged,
   );
 }
 

@@ -2,7 +2,7 @@
   "name": "interview-agent",
   "displayName": "Interview Agent",
   "description": "会调工具的 AI 面试官——Agent 主动调用工具核对代码、给出基于真实代码的追问",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "daisy-hhy",
   "license": "MIT",
   "repository": {

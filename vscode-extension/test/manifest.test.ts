@@ -32,4 +32,10 @@ describe("VS Code manifest", () => {
     expect(extensionSource).toContain("provider.captureOpenedResumeTab(tab)");
     expect(extensionSource).toContain("event.opened");
   });
+
+  it("监听 interview 配置变化并刷新面板快照", () => {
+    expect(extensionSource).toContain("workspace.onDidChangeConfiguration");
+    expect(extensionSource).toContain('event.affectsConfiguration("interview")');
+    expect(extensionSource).toContain("provider.refreshConfigFromSettings()");
+  });
 });

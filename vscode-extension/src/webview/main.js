@@ -11,6 +11,7 @@
   const configStatusEl = document.getElementById("configStatus");
   const modelConfigSummaryEl = document.getElementById("modelConfigSummary");
   const modelTestStatusEl = document.getElementById("modelTestStatus");
+  const runtimeDiagnosticsEl = document.getElementById("runtimeDiagnostics");
   const dependencyPanelEl = document.getElementById("dependencyPanel");
   const dependencyMessageEl = document.getElementById("dependencyMessage");
   const dependencyCommandEl = document.getElementById("dependencyCommand");
@@ -44,10 +45,6 @@
   let resumeDropArmSentAt = 0;
   let resumeCaptureEnabled = null;
   let workspaceState = { hasWorkspace: false, workspaceName: "", workspacePath: "" };
-
-  function logResumeDebug(message, detail) {
-    console.info("[resume-debug]", message, detail || "");
-  }
 
   function setAwaiting(value) {
     awaiting = value;
@@ -155,11 +152,6 @@
       return;
     }
     if (msg.type === "resumePicked") {
-      logResumeDebug("resumePicked", {
-        fileName: msg.resume?.fileName,
-        chars: msg.resume?.content?.length,
-        truncated: msg.resume?.truncated,
-      });
       resumeAttachment = msg.resume;
       resumeFileEl.textContent = msg.resume.truncated
         ? `${msg.resume.fileName}（已截取前 80000 字）`
@@ -168,17 +160,14 @@
       return;
     }
     if (msg.type === "resumeStatus") {
-      logResumeDebug("resumeStatus", msg.message || "");
       setStatus(msg.message || "");
       return;
     }
     if (msg.type === "resumeOcrProgress") {
-      logResumeDebug("resumeOcrProgress", msg.progress);
       setStatus(formatOcrProgress(msg.progress));
       return;
     }
     if (msg.type === "resumeError") {
-      logResumeDebug("resumeError", msg.message || "");
       appendBubble("error", "出错了", msg.message || "读取简历失败");
       setStatus("");
       return;
@@ -256,6 +245,9 @@
       case "tool_call":
         onToolCall(msg.params);
         break;
+      case "runtime_metric":
+        renderRuntimeMetric(msg.params);
+        break;
       case "done":
         onDone();
         break;
@@ -281,9 +273,10 @@
     settingsBtn.title = config.demoMode
       ? "打开设置：当前为 Demo Mode"
       : `打开设置：当前模型 ${config.model || "未配置模型"}`;
+    const runtime = config.demoMode ? "native（Demo）" : (config.agentRuntime || "native");
     modelConfigSummaryEl.textContent = config.demoMode
-      ? "当前：Demo Mode（不调用真实模型）"
-      : `当前：${config.model || "未配置模型"} · ${config.baseUrl || "OpenAI 默认端点"} · ${config.hasApiKey ? "已配置 API Key" : "未配置 API Key"}`;
+      ? `当前：Demo Mode（不调用真实模型） · runtime ${runtime}`
+      : `当前：${config.model || "未配置模型"} · ${config.baseUrl || "OpenAI 默认端点"} · runtime ${runtime} · ${config.hasApiKey ? "已配置 API Key" : "未配置 API Key"}`;
   }
 
   function onStream(params) {
@@ -605,6 +598,33 @@
     }).join("\n\n");
   }
 
+  function renderRuntimeMetric(metric) {
+    if (!runtimeDiagnosticsEl || !metric) {
+      return;
+    }
+    const firstDelta = typeof metric.first_delta_ms === "number"
+      ? `${metric.first_delta_ms}ms`
+      : "-";
+    const tools = Array.isArray(metric.tools) && metric.tools.length
+      ? metric.tools.map((item) => {
+        const elapsed = typeof item.elapsed_ms === "number" ? `${item.elapsed_ms}ms` : "-";
+        const keys = Array.isArray(item.args_keys) && item.args_keys.length
+          ? ` 参数:${item.args_keys.join(",")}`
+          : "";
+        const result = typeof item.result_chars === "number"
+          ? ` 结果:${item.result_chars}字`
+          : "";
+        return `${item.tool} ${elapsed}${keys}${result}`;
+      }).join("；")
+      : "无工具调用";
+    runtimeDiagnosticsEl.textContent = [
+      `runtime ${metric.runtime || "unknown"} · ${metric.status || "-"}`,
+      `首 token ${firstDelta} · 模型 ${metric.model_elapsed_ms || 0}ms · 总计 ${metric.total_elapsed_ms || 0}ms`,
+      `token 粗估 ${metric.estimated_tokens || 0} · 错误 ${metric.error_kind || "-"}`,
+      `工具 ${tools}`,
+    ].join("\n");
+  }
+
   function setStatus(text) {
     configStatusEl.textContent = text;
   }
@@ -790,13 +810,11 @@
       return;
     }
     event.preventDefault();
-    logResumeDebug("click pickResume");
     vscode.postMessage({ type: "pickResume" });
   });
   pickResumeBtn.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      logResumeDebug("keyboard pickResume", event.key);
       vscode.postMessage({ type: "pickResume" });
     }
   });
@@ -903,20 +921,13 @@
     pickResumeBtn.classList.remove("is-dragover");
     const payload = getDroppedResumePayload(event);
     if (!payload) {
-      logResumeDebug("drop payload missing", Array.from(event.dataTransfer?.types || []));
       setStatus("没有识别到拖拽文件，请拖入单个简历文件，或点击上传区域选择文件。");
       return;
     }
     if (payload.type === "file") {
-      logResumeDebug("drop file payload", {
-        name: payload.file.name,
-        size: payload.file.size,
-        type: payload.file.type,
-      });
       readDroppedResume(payload.file);
       return;
     }
-    logResumeDebug("drop path payload", payload.path);
     setStatus("正在读取拖拽文件...");
     vscode.postMessage({ type: "pickResumePath", path: payload.path });
   }
@@ -1016,7 +1027,6 @@
 
   function readDroppedResume(file) {
     if (file.size > DROPPED_RESUME_MAX_BYTES) {
-      logResumeDebug("drop file too large", { name: file.name, size: file.size });
       setStatus("简历文件超过 10MB，请点击上传区域选择文件。");
       return;
     }
@@ -1024,11 +1034,6 @@
     reader.onload = () => {
       const dataUrl = String(reader.result || "");
       const dataBase64 = dataUrl.includes(",") ? dataUrl.split(",").pop() : dataUrl;
-      logResumeDebug("drop file read done", {
-        name: file.name,
-        size: file.size,
-        base64Chars: dataBase64.length,
-      });
       vscode.postMessage({
         type: "pickResumeUpload",
         fileName: file.name,
@@ -1036,10 +1041,8 @@
       });
     };
     reader.onerror = () => {
-      logResumeDebug("drop file read failed", { name: file.name, size: file.size });
       setStatus("拖拽文件读取失败，请点击上传区域选择文件。");
     };
-    logResumeDebug("drop file read start", { name: file.name, size: file.size });
     setStatus("正在读取拖拽文件...");
     reader.readAsDataURL(file);
   }

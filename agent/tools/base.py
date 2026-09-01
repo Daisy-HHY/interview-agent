@@ -2,12 +2,13 @@ from typing import Any, Protocol
 
 
 class Tool(Protocol):
-    """所有工具的统一接口。
+    """所有 runtime 共用的最小工具接口。
 
-    无论是内置工具还是未来的 MCP 工具，都实现这三个契约：
-    - name:   工具名（LLM 调用时用这个名字）
-    - schema: OpenAI function calling 格式的参数 schema
-    - execute: 执行工具，返回结果字符串（喂给 LLM 的 Observation）
+    无论工具来源是内置实现、LangChain adapter 还是未来 MCP adapter，
+    runtime 只依赖这三个契约：
+    - name: 工具名，必须与 schema.function.name 一致。
+    - schema: OpenAI function calling 格式的参数 schema。
+    - execute: 接收 JSON schema 对应的 kwargs，返回可喂给 LLM 的字符串。
     """
 
     @property

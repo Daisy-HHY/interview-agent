@@ -14,6 +14,7 @@
 """
 
 import sys
+import time
 
 # Windows 默认 stdout/stderr/stdin 用系统编码（GBK/cp936），会导致中文输出
 # 在某些字符上抛 UnicodeEncodeError。强制改为 UTF-8，与协议约定一致
@@ -174,9 +175,29 @@ def _handle_chat(
         return
 
     loop = store.get_or_create(session)
+    started_at = time.perf_counter()
+    first_delta_ms: int | None = None
+    tool_starts: dict[str, list[tuple[float, int]]] = {}
+    tool_metrics: list[dict] = []
 
     # 回调：把 Agent 循环的内部事件转成协议通知
     def on_tool_call(name, args, phase, result):
+        if phase == "start":
+            tool_metrics.append({
+                "tool": name,
+                "elapsed_ms": None,
+                "args_keys": sorted(args.keys()) if isinstance(args, dict) else [],
+            })
+            tool_starts.setdefault(name, []).append((time.perf_counter(), len(tool_metrics) - 1))
+        elif phase == "end":
+            started = tool_starts.get(name, [])
+            if started:
+                tool_started_at, metric_index = started.pop()
+                metric = tool_metrics[metric_index]
+                metric["elapsed_ms"] = int((time.perf_counter() - tool_started_at) * 1000)
+                metric["result_chars"] = len(result or "")
+                if str(result).startswith(("工具执行出错", "错误：")):
+                    metric["error_kind"] = "tool"
         protocol.notify_tool_call(
             session, name, phase,
             args=args if phase == "start" else None,
@@ -186,6 +207,9 @@ def _handle_chat(
     # 流式回调（设计第 1.6 节，Phase 7-C）：每段文本实时推给前端。
     # on_delta 已经分段推了，所以下面的 on_response 不再整段重复发。
     def on_delta(delta):
+        nonlocal first_delta_ms
+        if first_delta_ms is None:
+            first_delta_ms = int((time.perf_counter() - started_at) * 1000)
         protocol.notify_stream(session, delta)
 
     def on_response(content):
@@ -203,6 +227,16 @@ def _handle_chat(
         )
     except AgentCancelled as e:
         store.save(session)
+        protocol.notify_runtime_metric(
+            session,
+            _build_runtime_metric(
+                loop,
+                started_at,
+                first_delta_ms,
+                tool_metrics,
+                status="cancelled",
+            ),
+        )
         protocol.notify_cancelled(session, e.partial)
         return
     except Exception as e:
@@ -219,18 +253,66 @@ def _handle_chat(
         # 按错误类型给用户不同提示（设计第 6.4.2 节）。
         # LLMError 携带友好中文提示；其他异常用通用格式。
         if isinstance(e, LLMError):
+            error_kind = e.kind
             protocol.notify_error(session, e.message)
         else:
+            error_kind = "runtime"
             protocol.notify_error(
                 session, f"Agent 执行失败: {type(e).__name__}: {e}"
             )
+        protocol.notify_runtime_metric(
+            session,
+            _build_runtime_metric(
+                loop,
+                started_at,
+                first_delta_ms,
+                tool_metrics,
+                status="error",
+                error_kind=error_kind,
+            ),
+        )
         return
 
     # 落盘历史（每轮对话后存一次，设计第 6.4.3 节）
     store.save(session)
 
+    protocol.notify_runtime_metric(
+        session,
+        _build_runtime_metric(
+            loop,
+            started_at,
+            first_delta_ms,
+            tool_metrics,
+            status="done",
+        ),
+    )
+
     # 本轮结束
     protocol.notify_done(session)
+
+
+def _build_runtime_metric(
+    loop,
+    started_at: float,
+    first_delta_ms: int | None,
+    tool_metrics: list[dict],
+    status: str,
+    error_kind: str | None = None,
+) -> dict:
+    """组装单轮 runtime 指标，不包含 API Key、正文或完整工具结果。"""
+    from agent.history import count_tokens
+
+    messages = getattr(loop, "messages", [])
+    return {
+        "runtime": getattr(loop, "runtime_name", "unknown"),
+        "status": status,
+        "model_elapsed_ms": getattr(loop, "last_model_elapsed_ms", 0),
+        "first_delta_ms": first_delta_ms,
+        "total_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+        "estimated_tokens": count_tokens(messages),
+        "error_kind": error_kind,
+        "tools": tool_metrics,
+    }
 
 
 def _handle_stop(cancel_event, params: dict) -> None:

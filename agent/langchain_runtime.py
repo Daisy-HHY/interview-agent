@@ -1,12 +1,17 @@
 """LangChain / LangGraph 运行时实现。"""
 
+import time
 from typing import Any, Callable
 
 from agent.history import compress_history, enforce_token_limit
 from agent.langchain_tools import build_langchain_tools
-from agent.llm_client import AgentCancelled
+from agent.llm_client import ERROR_KIND_BAD_REQUEST, AgentCancelled, LLMError
 from agent.runtime import CancelCallback, ResponseCallback, ToolCallCallback
 from agent.tools.base import ToolRegistry
+
+MAX_STEPS_FALLBACK = "（已达到最大推理步数，本轮停止。你可以继续描述你的项目。）"
+LANGGRAPH_RECURSION_MIN = 64
+LANGGRAPH_RECURSION_MULTIPLIER = 8
 
 
 class LangChainAgentRuntime:
@@ -26,8 +31,8 @@ class LangChainAgentRuntime:
         agent_factory: Callable[[Any, list[Any], str], Any] | None = None,
     ) -> None:
         self._api_key = api_key
-        self._model = model
-        self._base_url = base_url
+        self._model = model.strip()
+        self._base_url = base_url.strip() if base_url and base_url.strip() else None
         self._tools = tools
         self._system_prompt = system_prompt
         self._max_steps = max_steps
@@ -36,11 +41,22 @@ class LangChainAgentRuntime:
         self._model_factory = model_factory
         self._agent_factory = agent_factory
         self._messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        self._last_model_elapsed_ms = 0
+
+    @property
+    def runtime_name(self) -> str:
+        """返回实际运行的 runtime 名称。"""
+        return "langchain"
 
     @property
     def messages(self) -> list[dict]:
         """暴露历史，保持 SessionStore 原 JSON 落盘格式。"""
         return self._messages
+
+    @property
+    def last_model_elapsed_ms(self) -> int:
+        """返回最近一轮 LangChain agent 调用耗时。"""
+        return self._last_model_elapsed_ms
 
     def run(
         self,
@@ -51,6 +67,7 @@ class LangChainAgentRuntime:
         should_cancel: CancelCallback | None = None,
     ) -> str:
         """跑一轮 LangChain Agent，并映射回现有回调协议。"""
+        self._last_model_elapsed_ms = 0
         self._check_cancel(should_cancel)
         self._messages.append({"role": "user", "content": user_text})
         self._prepare_history()
@@ -62,12 +79,24 @@ class LangChainAgentRuntime:
         )
         agent = self._create_agent(langchain_tools)
 
+        model_started = time.perf_counter()
         try:
             answer = self._invoke_agent(agent, on_delta, should_cancel)
         except AgentCancelled as e:
+            self._last_model_elapsed_ms += int((time.perf_counter() - model_started) * 1000)
             if e.partial:
                 self._messages.append({"role": "assistant", "content": e.partial})
             raise
+        except Exception as e:
+            self._last_model_elapsed_ms += int((time.perf_counter() - model_started) * 1000)
+            if _is_graph_recursion_error(e):
+                answer = MAX_STEPS_FALLBACK
+                if on_delta:
+                    on_delta(answer)
+            else:
+                raise _to_llm_error(e, self._model) from e
+        else:
+            self._last_model_elapsed_ms += int((time.perf_counter() - model_started) * 1000)
 
         self._messages.append({"role": "assistant", "content": answer})
         if on_response:
@@ -128,7 +157,10 @@ class LangChainAgentRuntime:
         self._check_cancel(should_cancel)
         payload = {"messages": self._langchain_input_messages()}
         config = {
-            "recursion_limit": max(self._max_steps * 2, 2),
+            "recursion_limit": max(
+                self._max_steps * LANGGRAPH_RECURSION_MULTIPLIER,
+                LANGGRAPH_RECURSION_MIN,
+            ),
             "configurable": {"thread_id": "interview-agent"},
         }
 
@@ -237,9 +269,34 @@ def _message_content(message: Any) -> str:
     return str(content) if content else ""
 
 
+def _is_graph_recursion_error(e: Exception) -> bool:
+    """识别 LangGraph 递归上限错误，避免把 traceback 直接展示给用户。"""
+    return type(e).__name__ == "GraphRecursionError"
+
+
+def _to_llm_error(e: Exception, model: str) -> Exception:
+    """把 LangChain/OpenAI 常见模型错误转成项目已有友好错误。"""
+    text = str(e)
+    lowered = text.lower()
+    if (
+        type(e).__name__ in {"OpenAIInvalidRequestError", "BadRequestError"}
+        and (
+            "model does not exist" in lowered
+            or "model not found" in lowered
+            or "invalid model" in lowered
+            or "does not exist" in lowered
+        )
+    ):
+        return LLMError(
+            ERROR_KIND_BAD_REQUEST,
+            f"模型配置错误：模型「{model}」在当前 Base URL 对应的服务中不存在。"
+            "请检查 interview.model 是否拼写正确、与 interview.baseUrl 的服务商匹配。",
+        )
+    return e
+
+
 def _missing_langchain_message() -> str:
     return (
         "当前 Python 环境未安装 LangChain 运行时依赖。"
         "请安装 agent-framework 可选依赖，或将 interview.agentRuntime 改回 native。"
     )
-

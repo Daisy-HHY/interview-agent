@@ -6,7 +6,7 @@
  *
  * 两类消息：
  * - Request（TS → Python）：init / chat / stop
- * - Notification（Python → TS）：stream / tool_call / done / cancelled / error
+ * - Notification（Python → TS）：stream / tool_call / runtime_metric / done / cancelled / error
  *
  * 关键：Python 侧字段用 snake_case（api_key / base_url / attached_code），
  * 这里定义的类型和序列化函数都用 snake_case，与 Python 严格一致，
@@ -88,6 +88,28 @@ export interface ToolCallNotification {
   };
 }
 
+/** 单轮 runtime 指标，不包含 API Key、正文或完整工具结果。 */
+export interface RuntimeMetricNotification {
+  method: "runtime_metric";
+  params: {
+    session: string;
+    runtime: string;
+    status: "done" | "cancelled" | "error";
+    model_elapsed_ms: number;
+    first_delta_ms?: number | null;
+    total_elapsed_ms: number;
+    estimated_tokens: number;
+    error_kind?: string | null;
+    tools?: Array<{
+      tool: string;
+      elapsed_ms?: number | null;
+      args_keys?: string[];
+      result_chars?: number;
+      error_kind?: string;
+    }>;
+  };
+}
+
 /** 本轮 Agent 循环结束。 */
 export interface DoneNotification {
   method: "done";
@@ -117,6 +139,7 @@ export interface ErrorNotification {
 export type Notification =
   | StreamNotification
   | ToolCallNotification
+  | RuntimeMetricNotification
   | DoneNotification
   | CancelledNotification
   | ErrorNotification;
@@ -173,6 +196,7 @@ function isNotificationShape(value: unknown): value is ParsedNotification {
   return (
     method === "stream" ||
     method === "tool_call" ||
+    method === "runtime_metric" ||
     method === "done" ||
     method === "cancelled" ||
     method === "error"

@@ -18,8 +18,18 @@ class AgentRuntime(Protocol):
     """可替换的 Agent 运行时接口。"""
 
     @property
+    def runtime_name(self) -> str:
+        """返回实际运行的 runtime 名称。"""
+        ...
+
+    @property
     def messages(self) -> list[dict]:
         """返回当前会话消息历史，用于原 JSON 格式落盘。"""
+        ...
+
+    @property
+    def last_model_elapsed_ms(self) -> int:
+        """返回最近一轮模型调用累计耗时。"""
         ...
 
     def run(

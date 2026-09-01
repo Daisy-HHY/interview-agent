@@ -17,7 +17,7 @@ Interview Agent 是一个 VS Code 侧边栏 AI 技术面试官插件。打开任
 
 ## 从 GitHub Release 安装
 
-1. 到 GitHub Release 下载 `interview-agent-0.1.11.vsix`
+1. 到 GitHub Release 下载 `interview-agent-0.1.12.vsix`
 2. VS Code 执行 `Extensions: Install from VSIX...`
 3. 选择下载的 `.vsix`
 4. 打开要准备面试的目标项目文件夹
@@ -46,6 +46,7 @@ Demo Mode 使用内置 FakeLLM，不需要 API Key，也不会调用真实模型
 | `interview.model` | 模型名，例如 `gpt-4o-mini`、`deepseek-chat`、`glm-4-flash` |
 | `interview.pythonPath` | Python 解释器路径，默认 `python` |
 | `interview.demoMode` | 演示模式开关 |
+| `interview.agentRuntime` | Agent 运行时。默认 `native`；可选 `langchain` 做 LangChain / LangGraph 运行时验证 |
 
 配置后先点击“测试模型连接”。模型不存在时请检查 `interview.model` 是否与 `interview.baseUrl` 对应的服务商匹配。
 
@@ -64,6 +65,14 @@ python -m pip install PyMuPDF numpy rapidocr onnxruntime
 ```
 
 普通文字层 PDF、DOCX、TXT、MD 简历不需要 OCR 依赖。
+
+如需验证 LangChain runtime，再安装可选框架依赖：
+
+```powershell
+python -m pip install -e ".[agent-framework]"
+```
+
+0.1.12 仍默认使用 `native` runtime。只有真实 runtime benchmark 达标后，才应把默认值切换到 `langchain`。
 
 ## 导出报告
 
@@ -86,7 +95,7 @@ Markdown 报告包含 JD 摘要、项目摘要、考察技术点、回答表现�
 
 | 问题 | 处理方式 |
 |---|---|
-| 面板空白或提示没有数据提供程序 | 确认安装的是 `0.1.11` VSIX，执行 `Developer: Reload Window` |
+| 面板空白或提示没有数据提供程序 | 确认安装的是 `0.1.12` VSIX，执行 `Developer: Reload Window` |
 | 缺少 Python 依赖 | 在面板点击“安装 Agent 依赖”，或手动执行 `python -m pip install openai` |
 | Python 路径不对 | 在设置里填写 `interview.pythonPath` 为目标解释器完整路径 |
 | API Key 错误 | 检查 `interview.apiKey` 和账户额度 |

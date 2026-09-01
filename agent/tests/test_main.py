@@ -125,10 +125,15 @@ class TestChat:
         methods = [n["method"] for n in notifications]
         assert "stream" in methods
         assert methods[-1] == "done"  # 最后是 done
+        assert "runtime_metric" in methods
 
         # stream 通知含回答内容
         stream_msg = next(n for n in notifications if n["method"] == "stream")
         assert "数据库" in stream_msg["params"]["delta"]
+        metric = next(n for n in notifications if n["method"] == "runtime_metric")
+        assert metric["params"]["runtime"] == "native"
+        assert metric["params"]["status"] == "done"
+        assert metric["params"]["first_delta_ms"] is not None
 
     def test_chat_tool_calls_emit_tool_call_notifications(self, tmp_path):
         """调工具：发 tool_call 的 start/end 通知。"""
@@ -148,6 +153,9 @@ class TestChat:
         assert tool_msgs[0]["params"]["phase"] == "start"
         assert tool_msgs[0]["params"]["tool"] == "read_file"
         assert tool_msgs[1]["params"]["phase"] == "end"
+        metric = next(n for n in notifications if n["method"] == "runtime_metric")
+        assert metric["params"]["tools"][0]["tool"] == "read_file"
+        assert isinstance(metric["params"]["tools"][0]["elapsed_ms"], int)
 
     def test_chat_persists_history(self, tmp_path):
         """chat 后历史落盘（设计第 6.4.3 节）。"""
@@ -288,6 +296,8 @@ class TestRobustness:
         methods = [n["method"] for n in notifications]
         assert "cancelled" in methods
         assert "done" not in methods
+        metric = next(n for n in notifications if n["method"] == "runtime_metric")
+        assert metric["params"]["status"] == "cancelled"
 
     def test_empty_input_exits_cleanly(self, tmp_path):
         """空输入正常退出。"""
