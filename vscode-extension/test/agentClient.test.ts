@@ -34,9 +34,19 @@ describe("serializeLine", () => {
       workspace: "/fake",
       api_key: "sk",
       model: "m",
-      agent_runtime: "langchain",
+      agent_runtime: "pi",
     }));
-    expect(JSON.parse(line).params.agent_runtime).toBe("langchain");
+    expect(JSON.parse(line).params.agent_runtime).toBe("pi");
+  });
+
+  it("init 会携带 enabled_tools", () => {
+    const line = serializeLine(buildInit({
+      workspace: "/fake",
+      api_key: "sk",
+      model: "m",
+      enabled_tools: ["list_directory"],
+    }));
+    expect(JSON.parse(line).params.enabled_tools).toEqual(["list_directory"]);
   });
 });
 

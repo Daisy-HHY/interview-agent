@@ -260,6 +260,44 @@ class TestBuildRegistry:
         result = read_tool.execute(path="hello.py")
         assert "hi" in result
 
+    def test_build_registry_filters_enabled_tools(self, tmp_path):
+        """工具注册可按启用清单过滤。"""
+        registry = build_default_registry(
+            str(tmp_path),
+            enabled_tools=["list_directory", "search_code"],
+        )
+
+        schemas = {s["function"]["name"] for s in registry.all_schemas()}
+        assert schemas == {"list_directory", "search_code"}
+
+    def test_configured_enabled_tools_limit_runtime_schemas(self, tmp_path):
+        """SessionStore 配置 enabled_tools 后，LLM 只能看到启用工具 schema。"""
+        captured_tools = []
+
+        class SpyLLM:
+            def chat(self, messages, tools, on_delta=None, should_cancel=None):
+                captured_tools.extend(tools)
+                return make_text_response("ok")
+
+        store = SessionStore(llm_factory=lambda: SpyLLM())
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-test",
+            enabled_tools=["list_directory", "ghost"],
+        )
+
+        loop = store.get_or_create("s1")
+        loop.run("看看")
+
+        assert store.enabled_tools == ["list_directory"]
+        assert store.available_tools == [
+            "list_directory",
+            "search_code",
+            "read_file",
+            "lookup_questions",
+        ]
+        assert [tool["function"]["name"] for tool in captured_tools] == ["list_directory"]
+
 
 # ──────────────────────────────────────────────
 # 完整流程：configure → chat → save → restore
@@ -392,13 +430,40 @@ class TestTunableParams:
 
 class TestRuntimeSelection:
     def test_demo_mode_forces_native_runtime(self, tmp_path, monkeypatch):
-        """Demo Mode 必须使用 native/FakeLLM，不能因配置 langchain 误调真实模型。"""
+        """Demo Mode 必须使用 native/FakeLLM，不能因配置框架 runtime 误调真实模型。"""
         monkeypatch.setenv("INTERVIEW_FAKE_LLM", "1")
         store = SessionStore()
         store.configure(
             workspace=str(tmp_path),
             api_key="demo",
-            agent_runtime="langchain",
+            agent_runtime="pi",
+        )
+
+        loop = store.get_or_create("s1")
+
+        assert type(loop).__name__ == "AgentLoop"
+
+    def test_builds_pi_runtime(self, tmp_path):
+        """agent_runtime=pi 时创建 PiAgentRuntime。"""
+        store = SessionStore(llm_factory=lambda: FakeLLM([make_text_response("ok")]))
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-test",
+            agent_runtime="pi",
+        )
+
+        loop = store.get_or_create("s1")
+
+        assert type(loop).__name__ == "PiAgentRuntime"
+        assert loop.runtime_name == "pi"
+
+    def test_invalid_runtime_falls_back_to_native(self, tmp_path):
+        """无效 runtime 值回退 native，避免手写配置导致启动失败。"""
+        store = SessionStore(llm_factory=lambda: FakeLLM([make_text_response("ok")]))
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-test",
+            agent_runtime="bad",
         )
 
         loop = store.get_or_create("s1")
@@ -441,6 +506,20 @@ class TestInitParamsPassThrough:
         })
 
         assert store._agent_runtime == "langchain"  # noqa: SLF001
+
+    def test_init_with_pi_agent_runtime(self, tmp_path):
+        """init 消息支持 pi runtime。"""
+        store = SessionStore()
+        store._sessions_dir = str(tmp_path / ".sessions")  # noqa: SLF001
+
+        import agent.main as main_mod
+        main_mod._handle_init(store, {
+            "workspace": str(tmp_path),
+            "api_key": "sk-x",
+            "agent_runtime": "pi",
+        })
+
+        assert store._agent_runtime == "pi"  # noqa: SLF001
 
     def test_init_without_tuning_params_uses_defaults(self, tmp_path):
         """init 不带调优参数 → store 用 None（建 loop 时取默认值）。"""

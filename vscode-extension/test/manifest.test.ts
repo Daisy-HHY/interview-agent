@@ -24,7 +24,18 @@ describe("VS Code manifest", () => {
   it("声明 Agent runtime 切换配置，默认保持 native", () => {
     const runtime = manifest.contributes.configuration.properties["interview.agentRuntime"];
     expect(runtime.default).toBe("native");
-    expect(runtime.enum).toEqual(["native", "langchain"]);
+    expect(runtime.enum).toEqual(["native", "langchain", "pi"]);
+  });
+
+  it("声明可配置启用工具清单，默认启用基础工具", () => {
+    const tools = manifest.contributes.configuration.properties["interview.enabledTools"];
+    expect(tools.default).toEqual([
+      "list_directory",
+      "search_code",
+      "read_file",
+      "lookup_questions",
+    ]);
+    expect(tools.items.enum).toContain("read_file");
   });
 
   it("监听系统拖入文件被 VS Code 打开后的兜底 Tab 事件", () => {

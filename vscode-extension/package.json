@@ -2,7 +2,7 @@
   "name": "interview-agent",
   "displayName": "Interview Agent",
   "description": "会调工具的 AI 面试官——Agent 主动调用工具核对代码、给出基于真实代码的追问",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "publisher": "daisy-hhy",
   "license": "MIT",
   "repository": {
@@ -104,10 +104,30 @@
           "type": "string",
           "enum": [
             "native",
-            "langchain"
+            "langchain",
+            "pi"
           ],
           "default": "native",
-          "description": "Agent 运行时。native 使用内置循环；langchain 使用 LangChain / LangGraph 可选运行时。"
+          "description": "Agent 运行时。native 使用内置循环；langchain 使用 LangChain / LangGraph 可选运行时；pi 使用 Python pi-style 可选运行时。"
+        },
+        "interview.enabledTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "list_directory",
+              "search_code",
+              "read_file",
+              "lookup_questions"
+            ]
+          },
+          "default": [
+            "list_directory",
+            "search_code",
+            "read_file",
+            "lookup_questions"
+          ],
+          "description": "启用的 Agent 工具名。默认启用基础只读工具；删除某项后，模型将看不到对应工具 schema。"
         }
       }
     },

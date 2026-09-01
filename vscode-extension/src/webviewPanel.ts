@@ -76,7 +76,8 @@ export interface PanelOptions {
   maxSteps?: number;
   maxHistoryTokens?: number;
   maxKeptFull?: number;
-  agentRuntime?: "native" | "langchain";
+  agentRuntime?: "native" | "langchain" | "pi";
+  enabledTools?: string[];
 }
 
 /** 发给 Webview 的配置快照；不回传 API Key 明文。 */
@@ -84,7 +85,8 @@ export interface WebviewConfigSnapshot {
   model: string;
   baseUrl: string;
   demoMode: boolean;
-  agentRuntime: "native" | "langchain";
+  agentRuntime: "native" | "langchain" | "pi";
+  enabledTools: string[];
   hasApiKey: boolean;
   workspaceName: string;
   workspacePath: string;
@@ -843,6 +845,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
       maxHistoryTokens: options.maxHistoryTokens,
       maxKeptFull: options.maxKeptFull,
       agentRuntime: options.agentRuntime,
+      enabledTools: options.enabledTools,
     });
     this.wireAgent(webview);
     this.agent.start();
@@ -903,6 +906,7 @@ export class InterviewViewProvider implements WebviewViewProvider {
       baseUrl: options.baseUrl ?? "",
       demoMode: Boolean(options.demoMode),
       agentRuntime: options.agentRuntime || "native",
+      enabledTools: options.enabledTools || [],
       hasApiKey: Boolean(options.apiKey),
       workspaceName: options.workspaceName,
       workspacePath: options.workspace,

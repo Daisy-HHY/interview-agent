@@ -17,7 +17,7 @@ Interview Agent 是一个 VS Code 侧边栏 AI 技术面试官插件。打开任
 
 ## 从 GitHub Release 安装
 
-1. 到 GitHub Release 下载 `interview-agent-0.1.12.vsix`
+1. 到 GitHub Release 下载 `interview-agent-0.2.0.vsix`
 2. VS Code 执行 `Extensions: Install from VSIX...`
 3. 选择下载的 `.vsix`
 4. 打开要准备面试的目标项目文件夹
@@ -46,7 +46,8 @@ Demo Mode 使用内置 FakeLLM，不需要 API Key，也不会调用真实模型
 | `interview.model` | 模型名，例如 `gpt-4o-mini`、`deepseek-chat`、`glm-4-flash` |
 | `interview.pythonPath` | Python 解释器路径，默认 `python` |
 | `interview.demoMode` | 演示模式开关 |
-| `interview.agentRuntime` | Agent 运行时。默认 `native`；可选 `langchain` 做 LangChain / LangGraph 运行时验证 |
+| `interview.agentRuntime` | Agent 运行时。默认 `native`；可选 `langchain` 做 LangChain / LangGraph 运行时验证，也可选 `pi` 使用 Python pi-style 运行时 |
+| `interview.enabledTools` | 启用的 Agent 工具名列表。默认启用 `list_directory`、`search_code`、`read_file`、`lookup_questions` |
 
 配置后先点击“测试模型连接”。模型不存在时请检查 `interview.model` 是否与 `interview.baseUrl` 对应的服务商匹配。
 
@@ -72,7 +73,9 @@ python -m pip install PyMuPDF numpy rapidocr onnxruntime
 python -m pip install -e ".[agent-framework]"
 ```
 
-0.1.12 仍默认使用 `native` runtime。只有真实 runtime benchmark 达标后，才应把默认值切换到 `langchain`。
+0.2.0 仍默认使用 `native` runtime。`pi` 是可选实验运行时：它在 Python 子进程内吸收 Pi 的事件流、上下文外置和工具生命周期钩子结构，不直接依赖 TypeScript 版 Pi 包。只有真实 runtime benchmark 达标后，才应考虑把默认值从 `native` 切换到 `pi` 或 `langchain`。
+
+工具注册已和 runtime 解耦：`native`、`langchain`、`pi` 都只接收最终的 `ToolRegistry`。当前 0.2.0 先支持基础工具的启用和禁用，后续可在同一入口接入更多工具 provider 或 MCP adapter。
 
 ## 导出报告
 
@@ -95,7 +98,7 @@ Markdown 报告包含 JD 摘要、项目摘要、考察技术点、回答表现�
 
 | 问题 | 处理方式 |
 |---|---|
-| 面板空白或提示没有数据提供程序 | 确认安装的是 `0.1.12` VSIX，执行 `Developer: Reload Window` |
+| 面板空白或提示没有数据提供程序 | 确认安装的是 `0.2.0` VSIX，执行 `Developer: Reload Window` |
 | 缺少 Python 依赖 | 在面板点击“安装 Agent 依赖”，或手动执行 `python -m pip install openai` |
 | Python 路径不对 | 在设置里填写 `interview.pythonPath` 为目标解释器完整路径 |
 | API Key 错误 | 检查 `interview.apiKey` 和账户额度 |

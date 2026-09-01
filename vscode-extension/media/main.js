@@ -283,26 +283,38 @@
     if (stopping) {
       return;
     }
+    const delta = params.delta || "";
+    if (!delta) {
+      return;
+    }
     removeThinkingOrb();
     if (!currentInterviewerBubble) {
       currentInterviewerBubble = appendBubble("interviewer", "面试官", "");
-      currentInterviewerBubble.classList.add("cursor");
     }
-    const body = currentInterviewerBubble.querySelector(".bubble__body");
-    body.__raw = (body.__raw || "") + (params.delta || "");
-    body.innerHTML = renderMarkdown(body.__raw);
+    const segment = getCurrentInterviewerSegment();
+    segment.__raw = (segment.__raw || "") + delta;
+    segment.innerHTML = renderMarkdown(segment.__raw);
     scrollToBottom();
   }
 
   function onToolCall(params) {
     const { tool, phase, args, result } = params;
     if (phase === "start") {
-      if (!thinkingBubble) {
+      let activityRow = null;
+      if (hasCurrentInterviewerContent()) {
+        removeThinkingOrb();
+        activityRow = appendActivityRow(tool, true);
+      } else if (!thinkingBubble) {
         showThinkingOrb();
       }
-      thinkingToolLogs.push({ tool, args: formatArgs(args), result: "", running: true });
+      thinkingToolLogs.push({
+        tool,
+        args: formatArgs(args),
+        result: "",
+        running: true,
+        activityRow,
+      });
       updateThinkingDetails();
-      currentInterviewerBubble = null;
     } else {
       const last = [...thinkingToolLogs].reverse().find((item) =>
         item.tool === tool && item.running,
@@ -310,17 +322,78 @@
       if (last) {
         last.result = result || "";
         last.running = false;
+        updateActivityRow(last.activityRow, tool, false);
+      }
+      if (awaiting && !stopping && !thinkingBubble) {
+        showThinkingOrb({ resetLogs: false });
       }
       updateThinkingDetails();
     }
     scrollToBottom();
   }
 
+  function hasCurrentInterviewerContent() {
+    const body = currentInterviewerBubble?.querySelector(".bubble__body");
+    return Boolean(body && body.textContent.trim());
+  }
+
+  function getCurrentInterviewerSegment() {
+    const body = currentInterviewerBubble.querySelector(".bubble__body");
+    const last = body.lastElementChild;
+    if (last?.classList.contains("interviewer-segment")) {
+      return last;
+    }
+    const segment = document.createElement("div");
+    segment.className = "interviewer-segment";
+    segment.__raw = "";
+    body.appendChild(segment);
+    return segment;
+  }
+
+  function appendActivityRow(tool, running) {
+    const body = currentInterviewerBubble.querySelector(".bubble__body");
+    const row = document.createElement("div");
+    row.className = "activity-row";
+    const orb = document.createElement("span");
+    orb.className = "activity-row__orb";
+    orb.setAttribute("aria-hidden", "true");
+    const icon = document.createElement("span");
+    icon.className = "activity-row__icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "›";
+    const label = document.createElement("span");
+    label.className = "activity-row__label";
+    row.append(orb, icon, label);
+    body.appendChild(row);
+    updateActivityRow(row, tool, running);
+    return row;
+  }
+
+  function updateActivityRow(row, tool, running) {
+    if (!row) {
+      return;
+    }
+    row.classList.toggle("is-running", running);
+    const label = row.querySelector(".activity-row__label");
+    if (label) {
+      label.textContent = `${running ? "正在" : "已"}${toolActionLabel(tool)}`;
+    }
+  }
+
+  function toolActionLabel(tool) {
+    const labels = {
+      list_directory: "读取目录",
+      search_code: "搜索代码",
+      read_file: "读取文件",
+      lookup_questions: "查询题库",
+    };
+    return labels[tool] || `调用工具 ${tool || ""}`.trim();
+  }
+
   function onDone() {
     stopping = false;
     removeThinkingOrb();
     if (currentInterviewerBubble) {
-      currentInterviewerBubble.classList.remove("cursor");
       currentInterviewerBubble = null;
     }
     setAwaiting(false);
@@ -334,14 +407,14 @@
     removeThinkingOrb();
     const partial = params && params.partial ? String(params.partial) : "";
     const bubble = currentInterviewerBubble || appendBubble("interviewer", "面试官", "");
-    bubble.classList.remove("cursor");
-    const body = bubble.querySelector(".bubble__body");
-    const raw = body.__raw || partial;
+    currentInterviewerBubble = bubble;
+    const segment = getCurrentInterviewerSegment();
+    const raw = segment.__raw || partial;
     const suffix = raw
       ? `\n\n（已停止，生成 ${raw.length} 字）`
       : "（已停止）";
-    body.__raw = raw + suffix;
-    body.innerHTML = renderMarkdown(body.__raw);
+    segment.__raw = raw + suffix;
+    segment.innerHTML = renderMarkdown(segment.__raw);
     currentInterviewerBubble = null;
     stopping = false;
     setAwaiting(false);
@@ -356,7 +429,6 @@
     removeThinkingOrb();
     appendBubble("error", "出错了", params.message || "未知错误");
     if (currentInterviewerBubble) {
-      currentInterviewerBubble.classList.remove("cursor");
       currentInterviewerBubble = null;
     }
     setAwaiting(false);
@@ -375,8 +447,11 @@
     bodyEl.className = "bubble__body";
     if (kind === "interviewer") {
       // 面试官输出按 Markdown 渲染；渲染器先整体转义再转换，无注入风险
-      bodyEl.__raw = body || "";
-      bodyEl.innerHTML = renderMarkdown(bodyEl.__raw);
+      const segment = document.createElement("div");
+      segment.className = "interviewer-segment";
+      segment.__raw = body || "";
+      segment.innerHTML = renderMarkdown(segment.__raw);
+      bodyEl.appendChild(segment);
     } else {
       bodyEl.textContent = body || "";
     }
@@ -388,9 +463,11 @@
     return bubble;
   }
 
-  function showThinkingOrb() {
+  function showThinkingOrb(options = {}) {
     removeThinkingOrb();
-    thinkingToolLogs = [];
+    if (options.resetLogs !== false) {
+      thinkingToolLogs = [];
+    }
     thinkingBubble = document.createElement("div");
     thinkingBubble.className = "bubble bubble--thinking";
 

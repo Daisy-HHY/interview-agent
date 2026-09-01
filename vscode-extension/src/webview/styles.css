@@ -579,6 +579,56 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.activity-row__icon,
+.activity-row__orb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.activity-row__icon {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.activity-row__orb {
+  display: none;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 30% 24%, rgba(255, 255, 255, 0.96), transparent 20%),
+    conic-gradient(from 65deg, #ffffff, #b9c0ca, #343a43, #030405, #ffffff);
+  box-shadow: 0 0 10px rgba(220, 234, 255, 0.2);
+  animation: orbSpin 2s linear infinite;
+}
+
+.activity-row.is-running .activity-row__orb {
+  display: inline-flex;
+}
+
+.activity-row.is-running .activity-row__icon {
+  display: none;
+}
+
+.interviewer-segment:empty {
+  display: none;
+}
+
 .thinking {
   display: flex;
   align-items: center;
@@ -803,22 +853,6 @@ button:disabled {
 .composer__action.is-stop {
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
-}
-
-.cursor::after {
-  content: "▋";
-  opacity: 0.7;
-  animation: blink 0.8s infinite;
-}
-
-@keyframes blink {
-  0%,
-  100% {
-    opacity: 0.7;
-  }
-  50% {
-    opacity: 0;
-  }
 }
 
 @keyframes orbSpin {

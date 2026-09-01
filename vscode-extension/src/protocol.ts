@@ -31,8 +31,10 @@ export interface InitRequest {
     max_steps?: number;
     max_history_tokens?: number;
     max_kept_full?: number;
-    /** Agent runtime：默认 native，可选 langchain。 */
-    agent_runtime?: "native" | "langchain";
+    /** Agent runtime：默认 native，可选 langchain 或 pi。 */
+    agent_runtime?: "native" | "langchain" | "pi";
+    /** 启用工具名列表；不传则 Python 使用默认基础工具。 */
+    enabled_tools?: string[];
   };
 }
 
@@ -100,6 +102,8 @@ export interface RuntimeMetricNotification {
     total_elapsed_ms: number;
     estimated_tokens: number;
     error_kind?: string | null;
+    available_tools?: string[];
+    enabled_tools?: string[];
     tools?: Array<{
       tool: string;
       elapsed_ms?: number | null;

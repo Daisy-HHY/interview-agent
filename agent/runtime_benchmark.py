@@ -17,25 +17,40 @@ from agent.llm_client import LLMError
 from agent.session import SessionStore
 
 PROMPT = (
-    "请读取当前项目结构，结合项目中的 Agent runtime 和工具实现，"
+    "请先使用 list_directory 或 search_code 读取当前项目结构和 Agent runtime 相关代码，"
+    "必要时再用 read_file 查看关键文件；然后基于真实代码，"
     "追问一个和工具调用或会话恢复相关的技术问题。"
 )
+REQUIRED_TOOL_NAMES = {"list_directory", "search_code", "read_file"}
 
 
 def main() -> None:
-    """运行 native/langchain 对比 benchmark，输出 JSONL。"""
+    """运行 runtime 对比 benchmark，输出 JSONL。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", default=os.getcwd())
-    parser.add_argument("--runtime", choices=["native", "langchain", "both"], default="both")
+    parser.add_argument(
+        "--runtime",
+        choices=["native", "langchain", "pi", "both", "all"],
+        default="both",
+    )
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--output")
+    parser.add_argument(
+        "--enabled-tools",
+        help="逗号分隔的启用工具名；不传则使用默认基础工具。",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("INTERVIEW_API_KEY", "").strip()
     if not api_key:
         raise SystemExit("缺少 INTERVIEW_API_KEY，未执行真实 runtime benchmark。")
 
-    runtimes = ["native", "langchain"] if args.runtime == "both" else [args.runtime]
+    if args.runtime == "both":
+        runtimes = ["native", "langchain"]
+    elif args.runtime == "all":
+        runtimes = ["native", "langchain", "pi"]
+    else:
+        runtimes = [args.runtime]
     rows = []
     for runtime in runtimes:
         for index in range(args.rounds):
@@ -46,6 +61,7 @@ def main() -> None:
                 base_url=os.environ.get("INTERVIEW_BASE_URL") or None,
                 runtime=runtime,
                 index=index + 1,
+                enabled_tools=_parse_enabled_tools(args.enabled_tools),
             )
             rows.append(row)
             print(json.dumps(row, ensure_ascii=False), flush=True)
@@ -64,6 +80,7 @@ def run_once(
     base_url: str | None,
     runtime: str,
     index: int,
+    enabled_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """执行一轮真实模型调用，并返回不含敏感正文的指标。"""
     store = SessionStore()
@@ -73,6 +90,7 @@ def run_once(
         model=model,
         base_url=base_url,
         agent_runtime=runtime,
+        enabled_tools=enabled_tools,
     )
     session = f"benchmark-{runtime}-{index}"
     loop = store.get_or_create(session)
@@ -114,20 +132,41 @@ def run_once(
         status = "error"
         error_kind = type(e).__name__
 
+    tool_sequence = [tool["tool"] for tool in tools]
+    required_tool_used = any(name in REQUIRED_TOOL_NAMES for name in tool_sequence)
+    benchmark_status = (
+        "insufficient_tool_use"
+        if status == "done" and not required_tool_used
+        else status
+    )
+
     return {
         "runtime": getattr(loop, "runtime_name", runtime),
         "configured_runtime": runtime,
         "round": index,
         "status": status,
+        "benchmark_status": benchmark_status,
         "model": model,
         "base_url_configured": bool(base_url),
+        "available_tools": store.available_tools,
+        "enabled_tools": store.enabled_tools,
         "model_elapsed_ms": getattr(loop, "last_model_elapsed_ms", 0),
         "first_delta_ms": first_delta_ms,
         "total_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
         "estimated_tokens": count_tokens(loop.messages),
         "error_kind": error_kind,
+        "tool_call_count": len(tools),
+        "required_tool_used": required_tool_used,
+        "tool_sequence": tool_sequence,
         "tools": tools,
     }
+
+
+def _parse_enabled_tools(value: str | None) -> list[str] | None:
+    """解析逗号分隔的启用工具名。"""
+    if value is None:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 if __name__ == "__main__":

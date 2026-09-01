@@ -56,6 +56,12 @@ class TestStaticPrompt:
         # 明确不抠具体实现
         assert "不" in INTERVIEWER_SYSTEM_PROMPT and "read_file" in INTERVIEWER_SYSTEM_PROMPT
 
+    def test_workspace_means_interview_project_source(self):
+        """明确当前工作区是被面试项目源码，不是插件源码。"""
+        assert "当前 VS Code 工作区" in INTERVIEWER_SYSTEM_PROMPT
+        assert "项目源码根目录" in INTERVIEWER_SYSTEM_PROMPT
+        assert "不是 Interview Agent 插件自身源码" in INTERVIEWER_SYSTEM_PROMPT
+
     def test_has_tool_discipline_section(self):
         """有调工具纪律段。"""
         assert "纪律" in INTERVIEWER_SYSTEM_PROMPT
@@ -72,8 +78,8 @@ class TestStaticPrompt:
 
     def test_within_reasonable_length(self):
         """提示控制在合理长度（太长=太短）。
-        新定位内容更多（开场/JD/摸概貌），上限放宽到 1800。"""
-        assert len(INTERVIEWER_SYSTEM_PROMPT) < 1800
+        新定位内容更多（开场/JD/摸概貌/工作区定义），上限放宽到 2000。"""
+        assert len(INTERVIEWER_SYSTEM_PROMPT) < 2000
 
 
 # ──────────────────────────────────────────────
@@ -116,6 +122,8 @@ class TestDynamicInjection:
 
         assert "list_directory" in msg["content"]
         assert "search_code" in msg["content"]
+        assert "求职者用于面试的项目源码根目录" in msg["content"]
+        assert "不要把它理解为插件源码目录" in msg["content"]
 
     def test_injects_resume_when_provided(self):
         """提供简历时被注入。"""

@@ -17,6 +17,11 @@ from agent.llm_client import LLMClient
 from agent.prompt_builder import build_system_message
 from agent.runtime import AgentRuntime, NativeAgentRuntime
 from agent.tools.base import ToolRegistry
+from agent.tools.registry import (
+    available_tool_names,
+    build_tool_registry,
+    normalize_enabled_tools,
+)
 
 
 def _strip_surrogates(text: str) -> str:
@@ -57,6 +62,7 @@ class SessionStore:
         self._base_url: str | None = None
         self._resume: str | None = None
         self._agent_runtime: str = "native"
+        self._enabled_tools: list[str] | None = None
 
         # 调优参数（设计第 6.2、6.4 节，Phase 7-D 可配化）。
         # 默认 None：在 _create_loop 里取各自模块的硬编码默认值。
@@ -90,6 +96,7 @@ class SessionStore:
         max_history_tokens: int | None = None,
         max_kept_full: int | None = None,
         agent_runtime: str = "native",
+        enabled_tools: list[str] | None = None,
     ) -> None:
         """记录 init 消息带来的全局配置。
 
@@ -108,8 +115,23 @@ class SessionStore:
         self._max_history_tokens = max_history_tokens
         self._max_kept_full = max_kept_full
         self._agent_runtime = (
-            agent_runtime if agent_runtime in {"native", "langchain"} else "native"
+            agent_runtime if agent_runtime in {"native", "langchain", "pi"} else "native"
         )
+        self._enabled_tools = (
+            normalize_enabled_tools(enabled_tools)
+            if enabled_tools is not None
+            else None
+        )
+
+    @property
+    def available_tools(self) -> list[str]:
+        """返回当前可用工具名。"""
+        return available_tool_names()
+
+    @property
+    def enabled_tools(self) -> list[str]:
+        """返回当前启用工具名，未配置时返回默认启用工具。"""
+        return normalize_enabled_tools(self._enabled_tools)
 
     @property
     def workspace(self) -> str | None:
@@ -145,7 +167,10 @@ class SessionStore:
             raise RuntimeError("SessionStore 未 init：先调用 configure()")
 
         # 装配工具注册表（设计第 1.8.3 节：工具以 workspace 为根）
-        tools = build_default_registry(self._workspace)  # type: ignore[arg-type]
+        tools = build_default_registry(  # type: ignore[arg-type]
+            self._workspace,
+            enabled_tools=self._enabled_tools,
+        )
 
         # 组装系统提示（设计第 4.7 节：注入 workspace 和 resume）
         system_msg = build_system_message(self._workspace, self._resume)  # type: ignore[arg-type]
@@ -160,14 +185,15 @@ class SessionStore:
     def _build_runtime(self, tools: ToolRegistry, system_prompt: str) -> AgentRuntime:
         """根据配置创建 native 或 LangChain runtime。"""
         max_steps = self._max_steps if self._max_steps is not None else 8
-        use_langchain = (
-            self._agent_runtime == "langchain"
-            and os.environ.get("INTERVIEW_FAKE_LLM") != "1"
-        )
-        if self._agent_runtime == "langchain" and not use_langchain:
+        use_configured_runtime = os.environ.get("INTERVIEW_FAKE_LLM") != "1"
+        use_langchain = self._agent_runtime == "langchain" and use_configured_runtime
+        use_pi = self._agent_runtime == "pi" and use_configured_runtime
+        if self._agent_runtime in {"langchain", "pi"} and not use_configured_runtime:
             import sys
 
-            sys.stderr.write("[runtime] Demo Mode 使用 native/FakeLLM，忽略 langchain。\n")
+            sys.stderr.write(
+                f"[runtime] Demo Mode 使用 native/FakeLLM，忽略 {self._agent_runtime}。\n"
+            )
             sys.stderr.flush()
 
         if use_langchain:
@@ -194,6 +220,18 @@ class SessionStore:
                 f"可执行：python -m pip install -r {requirements}\n"
             )
             sys.stderr.flush()
+
+        if use_pi:
+            from agent.pi_runtime import PiAgentRuntime
+
+            return PiAgentRuntime(
+                llm=self._build_llm(),
+                tools=tools,
+                system_prompt=system_prompt,
+                max_steps=max_steps,
+                max_history_tokens=self._max_history_tokens,
+                max_kept_full=self._max_kept_full,
+            )
 
         # 建真实 LLM 客户端（init 带来的 key/model）
         llm = self._build_llm()
@@ -332,25 +370,15 @@ class SessionStore:
 # ──────────────────────────────────────────────
 
 
-def build_default_registry(workspace: str) -> ToolRegistry:
-    """装配 MVP 三件套工具（设计第 3.1 节）。
+def build_default_registry(
+    workspace: str,
+    enabled_tools: list[str] | None = None,
+) -> ToolRegistry:
+    """装配默认工具注册表。
 
-    list_directory / search_code / read_file，都以 workspace 为根。
-    Agent 循环靠这个 registry 执行工具。
+    兼容旧调用名；具体工具来源由 tools.registry 管理。
     """
-    from agent.tools.builtin import (
-        ListDirectoryTool,
-        LookupQuestionsTool,
-        ReadFileTool,
-        SearchCodeTool,
-    )
-
-    registry = ToolRegistry()
-    registry.register(ListDirectoryTool(workspace))
-    registry.register(SearchCodeTool(workspace))
-    registry.register(ReadFileTool(workspace))
-    registry.register(LookupQuestionsTool())
-    return registry
+    return build_tool_registry(workspace, enabled_tools=enabled_tools)
 
 
 def _langchain_available() -> bool:

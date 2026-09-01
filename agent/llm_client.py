@@ -46,9 +46,11 @@ class LLMResponse:
 
     content:     LLM 输出的文本（可能为空，当它选择调工具时）
     tool_calls:  LLM 要调的工具列表（可能为空，当它直接回答时）
+    finish_reason: 模型停止原因，用于识别 length 截断等特殊场景
     """
     content: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    finish_reason: str | None = None
 
 
 # ──────────────────────────────────────────────
@@ -308,8 +310,10 @@ class OpenAIClient:
     def _chat_blocking(self, kwargs: dict[str, Any]) -> LLMResponse:
         """非流式调用（默认路径，FakeLLM/单测用）。"""
         response = self._call_with_retry(kwargs)
-        message = response.choices[0].message
-        return self._build_response(message)
+        choice = response.choices[0]
+        llm_response = self._build_response(choice.message)
+        llm_response.finish_reason = getattr(choice, "finish_reason", None)
+        return llm_response
 
     def test_connection(self) -> None:
         """发起一次极短请求，用于验证 API Key、Base URL 和模型名。"""
@@ -333,6 +337,7 @@ class OpenAIClient:
         kwargs["stream"] = True
 
         accumulated_content = ""
+        finish_reason = None
         # tool_calls 分片累积：{index: {id, name, arguments_parts}}
         tool_calls_acc: dict[int, dict] = {}
 
@@ -343,7 +348,9 @@ class OpenAIClient:
                     raise AgentCancelled(accumulated_content)
                 if not chunk.choices:
                     continue
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                delta = choice.delta
 
                 # 文本 delta：累积 + 实时推出
                 if delta.content:
@@ -410,7 +417,11 @@ class OpenAIClient:
                 },
             })
 
-        return LLMResponse(content=accumulated_content, tool_calls=tool_calls)
+        return LLMResponse(
+            content=accumulated_content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+        )
 
     @staticmethod
     def _build_response(message: Any) -> LLMResponse:

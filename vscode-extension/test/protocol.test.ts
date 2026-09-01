@@ -57,6 +57,32 @@ describe("serialize", () => {
     expect(msg.params.agent_runtime).toBe("langchain");
   });
 
+  it("init 消息可携带 pi runtime", () => {
+    const line = serialize(
+      buildInit({
+        workspace: "/proj",
+        api_key: "sk-x",
+        model: "gpt-4o-mini",
+        agent_runtime: "pi",
+      }),
+    );
+    const msg = JSON.parse(line);
+    expect(msg.params.agent_runtime).toBe("pi");
+  });
+
+  it("init 消息可携带 enabled_tools", () => {
+    const line = serialize(
+      buildInit({
+        workspace: "/proj",
+        api_key: "sk-x",
+        model: "gpt-4o-mini",
+        enabled_tools: ["list_directory", "search_code"],
+      }),
+    );
+    const msg = JSON.parse(line);
+    expect(msg.params.enabled_tools).toEqual(["list_directory", "search_code"]);
+  });
+
   it("中文字符不被转义", () => {
     const line = serialize(buildChat({ session: "s1", text: "做了一个选课系统" }));
     // ensure_ascii 默认 false：中文原样出现
@@ -129,6 +155,17 @@ describe("parse", () => {
     if (n?.method === "runtime_metric") {
       expect(n.params.runtime).toBe("native");
       expect(n.params.tools?.[0].result_chars).toBe(8);
+    }
+  });
+
+  it("解析 runtime_metric 的工具配置字段", () => {
+    const n = parse(
+      '{"method":"runtime_metric","params":{"session":"s1","runtime":"pi","status":"done","model_elapsed_ms":12,"total_elapsed_ms":15,"estimated_tokens":20,"available_tools":["list_directory"],"enabled_tools":["list_directory"],"tools":[]}}',
+    );
+    expect(n?.method).toBe("runtime_metric");
+    if (n?.method === "runtime_metric") {
+      expect(n.params.available_tools).toEqual(["list_directory"]);
+      expect(n.params.enabled_tools).toEqual(["list_directory"]);
     }
   });
 

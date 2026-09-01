@@ -115,16 +115,43 @@ describe("Webview 面试入口模板", () => {
     expect(styles).toContain(".thinking-details__body");
   });
 
+  it("一轮面试官流式输出复用同一个气泡，工具调用期间仍显示思考球", () => {
+    expect(script).toContain("if (!thinkingBubble)");
+    expect(script).toContain("showThinkingOrb();");
+    expect(script).toContain("if (!delta)");
+    expect(script).not.toContain("updateThinkingDetails();\n      currentInterviewerBubble = null;");
+    expect(script).toContain("function getCurrentInterviewerSegment");
+    expect(script).toContain("segment.innerHTML = renderMarkdown(segment.__raw);");
+    expect(script).toContain("showThinkingOrb({ resetLogs: false });");
+    expect(script).toContain("if (options.resetLogs !== false)");
+  });
+
+  it("工具调用按 Codex 风格显示活动行并保留小思考球", () => {
+    expect(script).toContain("function appendActivityRow");
+    expect(script).toContain("function updateActivityRow");
+    expect(script).toContain("function toolActionLabel");
+    expect(script).toContain("activity-row__orb");
+    expect(styles).toContain(".activity-row");
+    expect(styles).toContain(".activity-row.is-running .activity-row__orb");
+    expect(styles).toContain(".activity-row.is-running .activity-row__icon");
+  });
+
+  it("面试官流式输出不显示块状光标效果", () => {
+    expect(script).not.toContain('classList.add("cursor")');
+    expect(styles).not.toContain(".cursor::after");
+    expect(styles).not.toContain("@keyframes blink");
+  });
+
   it("面试官消息渲染 Markdown，用户/工具消息保持纯文本", () => {
     expect(script).toContain("function renderMarkdown");
     expect(script).toContain("function escapeHtml");
     expect(script).toContain("function renderInline");
     // 面试官气泡走 Markdown 渲染（先转义再转换，无注入面）
-    expect(script).toContain("body.innerHTML = renderMarkdown");
+    expect(script).toContain("segment.innerHTML = renderMarkdown");
     // 行内代码防二次转换的占位机制
     expect(script).toContain("md-code");
     // 取消提示同样经 Markdown 渲染
-    expect(script).toContain("body.__raw");
+    expect(script).toContain("segment.__raw");
   });
 
   it("面试官回答和思考状态不显示外框", () => {

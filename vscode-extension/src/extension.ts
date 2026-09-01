@@ -35,7 +35,8 @@ interface InterviewConfig {
   maxSteps: number;
   maxHistoryTokens: number;
   maxKeptFull: number;
-  agentRuntime: "native" | "langchain";
+  agentRuntime: "native" | "langchain" | "pi";
+  enabledTools: string[];
 }
 
 function readConfig(): InterviewConfig {
@@ -50,7 +51,13 @@ function readConfig(): InterviewConfig {
     maxSteps: cfg.get<number>("maxSteps", 8),
     maxHistoryTokens: cfg.get<number>("maxHistoryTokens", 20000),
     maxKeptFull: cfg.get<number>("maxKeptFull", 3),
-    agentRuntime: cfg.get<"native" | "langchain">("agentRuntime", "native"),
+    agentRuntime: cfg.get<"native" | "langchain" | "pi">("agentRuntime", "native"),
+    enabledTools: cfg.get<string[]>("enabledTools", [
+      "list_directory",
+      "search_code",
+      "read_file",
+      "lookup_questions",
+    ]),
   };
 }
 
@@ -91,6 +98,7 @@ function buildPanelOptions(context: ExtensionContext): PanelOptions {
     maxHistoryTokens: cfg.maxHistoryTokens,
     maxKeptFull: cfg.maxKeptFull,
     agentRuntime: cfg.agentRuntime,
+    enabledTools: cfg.enabledTools,
   };
 }
 

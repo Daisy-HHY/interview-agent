@@ -769,6 +769,39 @@ class TestStreamingOutput:
         resp = client.chat([], [])  # 不传 on_delta
         assert resp.content == "hi"
 
+    def test_blocking_response_keeps_finish_reason(self, monkeypatch):
+        """非流式响应保留 finish_reason，供 runtime 判断 length 截断。"""
+        from agent.llm_client import OpenAIClient
+        client = OpenAIClient.__new__(OpenAIClient)
+        client._model = "test"
+
+        class FakeMsg:
+            content = "hi"
+            tool_calls = None
+
+        class FakeChoice:
+            message = FakeMsg()
+            finish_reason = "length"
+
+        class FakeResp:
+            choices = [FakeChoice()]
+
+        class MockChat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    return FakeResp()
+
+        class MockClient:
+            def __init__(self):
+                self.chat = MockChat()
+
+        client._client = MockClient()
+
+        resp = client.chat([], [])
+
+        assert resp.finish_reason == "length"
+
     def test_tool_calls_accumulated_from_fragments(self, monkeypatch):
         """★ 流式 tool_calls 分片到达，正确累积拼接。"""
         chunks = _make_tool_call_chunks()
@@ -782,6 +815,25 @@ class TestStreamingOutput:
         assert tc["function"]["name"] == "read_file"
         # arguments 分 2 片拼接
         assert tc["function"]["arguments"] == '{"path":"app.py"}'
+
+    def test_streaming_response_keeps_finish_reason(self, monkeypatch):
+        """流式响应保留最后一个 finish_reason。"""
+        class FakeDelta:
+            content = "hi"
+            tool_calls = None
+
+        class FakeChoice:
+            delta = FakeDelta()
+            finish_reason = "stop"
+
+        class FakeChunk:
+            choices = [FakeChoice()]
+
+        client, _ = self._make_streaming_client([FakeChunk()], monkeypatch)
+
+        resp = client.chat([], [], on_delta=lambda s: None)
+
+        assert resp.finish_reason == "stop"
 
     def test_interruption_preserves_partial_content(self, monkeypatch):
         """★ 中断保留（设计 6.5）：流式中途断网，保留已生成文本。"""

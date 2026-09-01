@@ -90,6 +90,27 @@ class TestInit:
         assert store.is_configured
         assert store.workspace == str(tmp_path)
 
+    def test_init_passes_enabled_tools(self, tmp_path):
+        """init 消息可配置启用工具清单。"""
+        store = SessionStore()
+        store._sessions_dir = str(tmp_path / ".sessions")  # noqa: SLF001
+
+        run_input(
+            [{
+                "jsonrpc": "2.0",
+                "method": "init",
+                "params": {
+                    "workspace": str(tmp_path),
+                    "api_key": "sk-x",
+                    "model": "m",
+                    "enabled_tools": ["search_code", "ghost"],
+                },
+            }],
+            store,
+        )
+
+        assert store.enabled_tools == ["search_code"]
+
     def test_init_missing_params_sends_error(self, tmp_path):
         """init 缺 workspace 或 key 时发 error 通知。"""
         store = SessionStore()
@@ -134,6 +155,7 @@ class TestChat:
         assert metric["params"]["runtime"] == "native"
         assert metric["params"]["status"] == "done"
         assert metric["params"]["first_delta_ms"] is not None
+        assert "enabled_tools" in metric["params"]
 
     def test_chat_tool_calls_emit_tool_call_notifications(self, tmp_path):
         """调工具：发 tool_call 的 start/end 通知。"""

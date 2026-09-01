@@ -128,6 +128,9 @@ def _handle_init(store: SessionStore, params: dict) -> None:
     max_history_tokens = params.get("max_history_tokens")
     max_kept_full = params.get("max_kept_full")
     agent_runtime = params.get("agent_runtime", "native")
+    enabled_tools = params.get("enabled_tools")
+    if not isinstance(enabled_tools, list):
+        enabled_tools = None
 
     if not workspace or not api_key:
         protocol.notify_error(
@@ -146,6 +149,7 @@ def _handle_init(store: SessionStore, params: dict) -> None:
         max_history_tokens=max_history_tokens,
         max_kept_full=max_kept_full,
         agent_runtime=agent_runtime,
+        enabled_tools=enabled_tools,
     )
 
 
@@ -235,6 +239,8 @@ def _handle_chat(
                 first_delta_ms,
                 tool_metrics,
                 status="cancelled",
+                available_tools=store.available_tools,
+                enabled_tools=store.enabled_tools,
             ),
         )
         protocol.notify_cancelled(session, e.partial)
@@ -269,6 +275,8 @@ def _handle_chat(
                 tool_metrics,
                 status="error",
                 error_kind=error_kind,
+                available_tools=store.available_tools,
+                enabled_tools=store.enabled_tools,
             ),
         )
         return
@@ -284,6 +292,8 @@ def _handle_chat(
             first_delta_ms,
             tool_metrics,
             status="done",
+            available_tools=store.available_tools,
+            enabled_tools=store.enabled_tools,
         ),
     )
 
@@ -298,6 +308,8 @@ def _build_runtime_metric(
     tool_metrics: list[dict],
     status: str,
     error_kind: str | None = None,
+    available_tools: list[str] | None = None,
+    enabled_tools: list[str] | None = None,
 ) -> dict:
     """组装单轮 runtime 指标，不包含 API Key、正文或完整工具结果。"""
     from agent.history import count_tokens
@@ -311,6 +323,8 @@ def _build_runtime_metric(
         "total_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
         "estimated_tokens": count_tokens(messages),
         "error_kind": error_kind,
+        "available_tools": available_tools or [],
+        "enabled_tools": enabled_tools or [],
         "tools": tool_metrics,
     }
 
