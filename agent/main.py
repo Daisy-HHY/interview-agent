@@ -133,10 +133,22 @@ def _handle_init(store: SessionStore, params: dict) -> None:
     max_steps = params.get("max_steps")
     max_history_tokens = params.get("max_history_tokens")
     max_kept_full = params.get("max_kept_full")
+    pi_max_steps = params.get("pi_max_steps")
+    if not isinstance(pi_max_steps, int) or pi_max_steps <= 0:
+        pi_max_steps = None
     agent_runtime = params.get("agent_runtime", "native")
     enabled_tools = params.get("enabled_tools")
     if not isinstance(enabled_tools, list):
         enabled_tools = None
+    compaction_enabled = params.get("compaction_enabled")
+    if not isinstance(compaction_enabled, bool):
+        compaction_enabled = None
+    compaction_trigger_tokens = params.get("compaction_trigger_tokens")
+    if not isinstance(compaction_trigger_tokens, int) or compaction_trigger_tokens <= 0:
+        compaction_trigger_tokens = None
+    compaction_keep_messages = params.get("compaction_keep_messages")
+    if not isinstance(compaction_keep_messages, int) or compaction_keep_messages <= 0:
+        compaction_keep_messages = None
 
     if not workspace or not api_key:
         protocol.notify_error(
@@ -154,8 +166,12 @@ def _handle_init(store: SessionStore, params: dict) -> None:
         max_steps=max_steps,
         max_history_tokens=max_history_tokens,
         max_kept_full=max_kept_full,
+        pi_max_steps=pi_max_steps,
         agent_runtime=agent_runtime,
         enabled_tools=enabled_tools,
+        compaction_enabled=compaction_enabled,
+        compaction_trigger_tokens=compaction_trigger_tokens,
+        compaction_keep_messages=compaction_keep_messages,
     )
 
 
@@ -332,6 +348,7 @@ def _build_runtime_metric(
         "available_tools": available_tools or [],
         "enabled_tools": enabled_tools or [],
         "tools": tool_metrics,
+        "compaction": getattr(loop, "last_compaction", {"state": "disabled"}),
     }
 
 

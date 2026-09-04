@@ -247,6 +247,29 @@ def test_pi_stops_at_max_steps():
     assert fake.call_count == 2
 
 
+def test_pi_default_max_steps_is_32():
+    fake = FakeLLM([make_text_response("答")])
+    loop = PiAgentRuntime(fake, registry_with(), "sys")
+
+    assert loop._max_steps == 32  # noqa: SLF001
+
+
+def test_pi_continues_after_native_eight_step_budget():
+    """Pi 不复用 native 的 8 回合限制，直到模型无工具调用才结束。"""
+    fake = FakeLLM([
+        *(tool_response(("echo", {"text": str(index)})) for index in range(9)),
+        make_text_response("完整回答"),
+    ])
+    tool = EchoTool()
+    loop = PiAgentRuntime(fake, registry_with(tool), "sys")
+
+    result = loop.run("请完整查看项目")
+
+    assert result == "完整回答"
+    assert fake.call_count == 10
+    assert len(tool.calls) == 9
+
+
 def test_pi_cancel_before_tool_keeps_history_valid():
     fake = FakeLLM([tool_response(("echo", {"text": "x"}))])
     loop = PiAgentRuntime(fake, registry_with(EchoTool()), "sys")
@@ -415,3 +438,69 @@ def test_pi_tool_executor_can_be_used_directly():
         "message_end",
     ]
     assert [item[1] for item in callbacks] == ["start", "end"]
+
+
+def test_pi_compaction_is_disabled_by_default():
+    fake = FakeLLM([make_text_response("答")])
+    loop = PiAgentRuntime(fake, registry_with(), "sys")
+
+    loop.run("问题")
+
+    assert not [event for event in loop.events if event["type"] == "context_compaction"]
+
+
+def test_pi_compaction_uses_checkpoint_without_mutating_history():
+    class RecordingLLM:
+        def __init__(self):
+            self.messages = None
+
+        def chat(self, messages, tools, on_delta=None, should_cancel=None):
+            self.messages = messages
+            return make_text_response("答")
+
+    llm = RecordingLLM()
+    loop = PiAgentRuntime(
+        llm,
+        registry_with(),
+        "sys",
+        config=AgentLoopConfig(
+            compaction_enabled=True,
+            compaction_trigger_tokens=5,
+            compaction_keep_messages=2,
+        ),
+    )
+    loop.restore_messages([
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "旧问题 " * 10},
+        {"role": "assistant", "content": "旧回答 " * 10},
+    ])
+    before = list(loop.messages)
+
+    loop.run("新问题")
+
+    event = [event for event in loop.events if event["type"] == "context_compaction"][-1]
+    assert event["state"] == "completed"
+    assert event["before_messages"] > event["after_messages"]
+    assert llm.messages[0] == {"role": "system", "content": "sys"}
+    assert llm.messages[-1] == {"role": "user", "content": "新问题"}
+    assert loop.messages[: len(before)] == before
+
+
+def test_pi_compaction_invalid_result_falls_back_to_checkpoint():
+    fake = FakeLLM([make_text_response("答")])
+    loop = PiAgentRuntime(
+        fake,
+        registry_with(),
+        "sys",
+        config=AgentLoopConfig(
+            compaction_enabled=True,
+            compaction_trigger_tokens=1,
+            compaction_fn=lambda _messages, _cancel: [{"role": "tool", "content": "孤立"}],
+        ),
+    )
+
+    loop.run("问题")
+
+    event = [event for event in loop.events if event["type"] == "context_compaction"][-1]
+    assert event["state"] == "fallback"
+    assert event["after_messages"] == event["before_messages"]

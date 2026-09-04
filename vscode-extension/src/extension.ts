@@ -35,8 +35,12 @@ interface InterviewConfig {
   maxSteps: number;
   maxHistoryTokens: number;
   maxKeptFull: number;
+  piMaxSteps: number;
   agentRuntime: "native" | "langchain" | "pi";
   enabledTools: string[];
+  compactionEnabled: boolean;
+  compactionTriggerTokens: number;
+  compactionKeepMessages: number;
 }
 
 function readConfig(): InterviewConfig {
@@ -51,6 +55,7 @@ function readConfig(): InterviewConfig {
     maxSteps: cfg.get<number>("maxSteps", 8),
     maxHistoryTokens: cfg.get<number>("maxHistoryTokens", 20000),
     maxKeptFull: cfg.get<number>("maxKeptFull", 3),
+    piMaxSteps: cfg.get<number>("piMaxSteps", 32),
     agentRuntime: cfg.get<"native" | "langchain" | "pi">("agentRuntime", "native"),
     enabledTools: cfg.get<string[]>("enabledTools", [
       "list_directory",
@@ -58,6 +63,9 @@ function readConfig(): InterviewConfig {
       "read_file",
       "lookup_questions",
     ]),
+    compactionEnabled: cfg.get<boolean>("compactionEnabled", false),
+    compactionTriggerTokens: cfg.get<number>("compactionTriggerTokens", 12000),
+    compactionKeepMessages: cfg.get<number>("compactionKeepMessages", 6),
   };
 }
 
@@ -97,8 +105,12 @@ function buildPanelOptions(context: ExtensionContext): PanelOptions {
     maxSteps: cfg.maxSteps,
     maxHistoryTokens: cfg.maxHistoryTokens,
     maxKeptFull: cfg.maxKeptFull,
+    piMaxSteps: cfg.piMaxSteps,
     agentRuntime: cfg.agentRuntime,
     enabledTools: cfg.enabledTools,
+    compactionEnabled: cfg.compactionEnabled,
+    compactionTriggerTokens: cfg.compactionTriggerTokens,
+    compactionKeepMessages: cfg.compactionKeepMessages,
   };
 }
 

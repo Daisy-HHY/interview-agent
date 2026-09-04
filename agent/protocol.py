@@ -133,6 +133,7 @@ def _safe_agent_event(event: dict) -> dict | None:
         "tool_execution_start",
         "tool_execution_end",
         "message_update",
+        "context_compaction",
     }:
         return None
 
@@ -144,6 +145,20 @@ def _safe_agent_event(event: dict) -> dict | None:
 
     if event_type == "message_update":
         params["delta_chars"] = len(str(event.get("delta") or ""))
+
+    if event_type == "context_compaction":
+        state = event.get("state")
+        if state:
+            params["state"] = str(state)
+        for key in (
+            "before_messages",
+            "after_messages",
+            "before_tokens",
+            "after_tokens",
+        ):
+            value = event.get(key)
+            if isinstance(value, int):
+                params[key] = value
 
     if event_type.startswith("tool_execution_"):
         tool_name = event.get("tool_name") or event.get("tool")

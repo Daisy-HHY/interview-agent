@@ -361,6 +361,19 @@ class TestTunableParams:
         loop = store.get_or_create("s1")
         assert loop._max_steps == 8  # noqa: SLF001
 
+    def test_pi_uses_larger_default_step_budget(self, tmp_path):
+        """Pi 默认保留更大的探索预算，但仍保留硬安全阀。"""
+        store = SessionStore(llm_factory=lambda: FakeLLM([make_text_response("ok")]))
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-test",
+            agent_runtime="pi",
+        )
+
+        loop = store.get_or_create("s1")
+
+        assert loop._max_steps == 32  # noqa: SLF001
+
     def test_max_history_tokens_passed_to_loop(self, tmp_path):
         """configure 传 max_history_tokens → AgentLoop 持有这个值。"""
         store, _ = make_store(tmp_path)
@@ -546,6 +559,24 @@ class TestInitParamsPassThrough:
         })
 
         assert store._agent_runtime == "pi"  # noqa: SLF001
+
+    def test_init_with_pi_compaction_config(self, tmp_path):
+        """init 的 checkpoint 配置应传入 Pi runtime。"""
+        store = SessionStore(llm_factory=lambda: FakeLLM([make_text_response("ok")]))
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-test",
+            agent_runtime="pi",
+            compaction_enabled=True,
+            compaction_trigger_tokens=10,
+            compaction_keep_messages=4,
+        )
+
+        loop = store.get_or_create("s1")
+
+        assert loop._config.compaction_enabled is True  # noqa: SLF001
+        assert loop._config.compaction_trigger_tokens == 10  # noqa: SLF001
+        assert loop._config.compaction_keep_messages == 4  # noqa: SLF001
 
     def test_init_without_tuning_params_uses_defaults(self, tmp_path):
         """init 不带调优参数 → store 用 None（建 loop 时取默认值）。"""

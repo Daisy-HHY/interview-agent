@@ -47,7 +47,11 @@ Demo Mode 使用内置 FakeLLM，不需要 API Key，也不会调用真实模型
 | `interview.pythonPath` | Python 解释器路径，默认 `python` |
 | `interview.demoMode` | 演示模式开关 |
 | `interview.agentRuntime` | Agent 运行时。默认 `native`；可选 `langchain` 做 LangChain / LangGraph 运行时验证，也可选 `pi` 使用 Python pi-style 运行时 |
+| `interview.piMaxSteps` | Pi runtime 的单轮最大模型回合数，默认 32；模型不再请求工具时立即结束，该值仅作为防止无限工具循环的安全阀 |
 | `interview.enabledTools` | 启用的 Agent 工具名列表。默认启用 `list_directory`、`search_code`、`read_file`、`lookup_questions` |
+| `interview.compactionEnabled` | Pi checkpoint 上下文压缩开关，默认关闭；失败时自动回退 |
+| `interview.compactionTriggerTokens` | Pi checkpoint 压缩触发的估算 token 数 |
+| `interview.compactionKeepMessages` | 压缩后保留的最近消息数量，系统提示始终保留 |
 
 配置后先点击“测试模型连接”。模型不存在时请检查 `interview.model` 是否与 `interview.baseUrl` 对应的服务商匹配。
 
@@ -83,10 +87,11 @@ python -m pip install -e ".[agent-framework]"
 |---|---|---|
 | 外置上下文 | `AgentContext` + `transform_context` / `convert_to_llm` | 已实现，作为项目自己的 context pipeline |
 | 工具生命周期 | `PiToolExecutor` + before/after hook | 已实现，支持显式进程内注册 |
-| 事件流 | Pi 内部事件 + `agent_event` 脱敏协议通知 | 0.2.1 已接通，完整时间线 UI 后续实现 |
-| 上下文压缩 | 复用 `compress_history` / `enforce_token_limit` | 已实现，智能摘要压缩后续实现 |
+| 事件流 | Pi 内部事件 + `agent_event` 脱敏协议通知 | 0.2.2 增加限量 Webview 时间线 |
+| 上下文压缩 | checkpoint + `compress_history` / `enforce_token_limit` | 0.2.2 可选、默认关闭、失败回退 |
 | 会话持久化 | `.sessions/{id}.json` 线性消息数组 | 保持现有格式，session tree 后续规划 |
-| MCP、fork、steer | 当前未实现 | 不属于 0.2.1 范围 |
+| MCP | 本地 `McpToolAdapter` 合同和 fake 隔离测试 | 仅接口设计，不接真实传输 |
+| 外部 hook 文件 | `piHooksFile` 安全评估 | 0.2.2 默认不加载、不执行 |
 
 Pi runtime 的外部边界仍是 [agent/runtime.py](agent/runtime.py) 中的 `AgentRuntime`；会话文件由 `SessionStore` 管理，runtime 不直接读写文件。
 
@@ -97,6 +102,14 @@ Pi runtime 的外部边界仍是 [agent/runtime.py](agent/runtime.py) 中的 `Ag
 ```
 
 工具注册已和 runtime 解耦：`native`、`langchain`、`pi` 都只接收最终的 `ToolRegistry`。当前 0.2.0 先支持基础工具的启用和禁用，后续可在同一入口接入更多工具 provider 或 MCP adapter。
+
+0.2.2 的 FakeLLM 回归不需要 API Key 或网络：
+
+```powershell
+.\.venv\Scripts\python.exe -m agent.runtime_benchmark --runtime all --rounds 1 --fake-llm
+```
+
+checkpoint 压缩默认关闭，只在 `interview.compactionEnabled` 开启且达到阈值时影响本次模型请求上下文，不会隐式改写 `.sessions` 历史。运行中的脱敏事件会显示在诊断区域；事件不包含完整 prompt、工具参数值或工具结果。MCP adapter 目前只作为未来工具 provider 的隔离合同，未建立远程连接。
 
 ## 导出报告
 

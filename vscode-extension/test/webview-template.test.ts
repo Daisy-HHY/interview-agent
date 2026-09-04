@@ -115,6 +115,14 @@ describe("Webview 面试入口模板", () => {
     expect(styles).toContain(".thinking-details__body");
   });
 
+  it("工具调用轨迹在输出间合并为可保留的折叠组", () => {
+    expect(script).toContain("function finishThinkingTrace");
+    expect(script).toContain("thinking-details");
+    expect(script).toContain("已完成");
+    expect(script).toContain("thinkingToolLogs");
+    expect(styles).toContain(".bubble--thinking.is-complete");
+  });
+
   it("一轮面试官流式输出复用同一个气泡，工具调用期间仍显示思考球", () => {
     expect(script).toContain("if (!thinkingBubble)");
     expect(script).toContain("showThinkingOrb();");
@@ -122,18 +130,14 @@ describe("Webview 面试入口模板", () => {
     expect(script).not.toContain("updateThinkingDetails();\n      currentInterviewerBubble = null;");
     expect(script).toContain("function getCurrentInterviewerSegment");
     expect(script).toContain("segment.innerHTML = renderMarkdown(segment.__raw);");
-    expect(script).toContain("showThinkingOrb({ resetLogs: false });");
+    expect(script).toContain("finishThinkingTrace();");
     expect(script).toContain("if (options.resetLogs !== false)");
   });
 
-  it("工具调用按 Codex 风格显示活动行并保留小思考球", () => {
-    expect(script).toContain("function appendActivityRow");
-    expect(script).toContain("function updateActivityRow");
-    expect(script).toContain("function toolActionLabel");
-    expect(script).toContain("activity-row__orb");
-    expect(styles).toContain(".activity-row");
-    expect(styles).toContain(".activity-row.is-running .activity-row__orb");
-    expect(styles).toContain(".activity-row.is-running .activity-row__icon");
+  it("工具调用轨迹统一收纳到可保留的思考组", () => {
+    expect(script).not.toContain("function appendActivityRow");
+    expect(script).not.toContain("function updateActivityRow");
+    expect(styles).not.toContain(".activity-row");
   });
 
   it("面试官流式输出不显示块状光标效果", () => {
@@ -198,6 +202,14 @@ describe("Webview 面试入口模板", () => {
     expect(script).toContain("metric.model_elapsed_ms");
     expect(script).toContain("config.agentRuntime");
     expect(styles).toContain(".diagnostics__body");
+  });
+
+  it("诊断面板包含限量脱敏的 runtime 事件时间线", () => {
+    expect(html).toContain('id="runtimeTimeline"');
+    expect(script).toContain("function renderAgentEvent");
+    expect(script).toContain("MAX_RUNTIME_EVENTS");
+    expect(script).toContain("message_update");
+    expect(styles).toContain(".diagnostics__timeline");
   });
 
   it("包含依赖安装和历史会话入口", () => {

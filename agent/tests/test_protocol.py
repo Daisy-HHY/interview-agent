@@ -224,6 +224,28 @@ class TestNotify:
         assert "API_KEY=secret" not in written[0]
         assert "full prompt secret" not in written[0]
 
+    def test_notify_agent_event_includes_only_compaction_metrics(self, monkeypatch):
+        """上下文压缩事件只发送状态和数量统计。"""
+        written = []
+        monkeypatch.setattr(protocol.sys.stdout, "write", written.append)
+        monkeypatch.setattr(protocol.sys.stdout, "flush", lambda: None)
+
+        protocol.notify_agent_event("s1", {
+            "type": "context_compaction",
+            "state": "fallback",
+            "before_messages": 8,
+            "after_messages": 8,
+            "before_tokens": 100,
+            "after_tokens": 100,
+            "summary": "完整摘要不应输出",
+        })
+
+        line = written[0]
+        msg = json.loads(line)
+        assert msg["params"]["state"] == "fallback"
+        assert msg["params"]["before_messages"] == 8
+        assert "完整摘要不应输出" not in line
+
     def test_notify_done(self, monkeypatch):
         """完成通知。"""
         written = []

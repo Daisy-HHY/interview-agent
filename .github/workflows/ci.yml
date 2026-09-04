@@ -1,0 +1,53 @@
+name: Interview Agent CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Python tests
+        run: python -m pytest
+
+      - name: Python lint
+        run: python -m ruff check agent
+
+      - name: FakeLLM runtime regression
+        run: python -m agent.runtime_benchmark --workspace . --runtime all --rounds 1 --fake-llm
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Install extension dependencies
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Extension tests
+        working-directory: vscode-extension
+        run: npm test
+
+      - name: TypeScript check
+        working-directory: vscode-extension
+        run: npx tsc -p ./ --noEmit
+
+      - name: Extension compile
+        working-directory: vscode-extension
+        run: npm run compile

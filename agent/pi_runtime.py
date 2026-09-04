@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from agent.agent_loop import _sanitize_surrogates
-from agent.history import compress_history, enforce_token_limit
+from agent.history import compress_history, count_tokens, enforce_token_limit
 from agent.llm_client import AgentCancelled, LLMClient, LLMResponse
 from agent.runtime import CancelCallback, ResponseCallback, ToolCallCallback
 from agent.tools.base import ToolRegistry
@@ -33,6 +34,7 @@ TransformContext = Callable[[list[dict[str, Any]], CancelCallback | None], list[
 ConvertToLlm = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 PrepareNextTurn = Callable[[dict[str, Any]], "AgentLoopTurnUpdate | AgentContext | None"]
 ShouldStopAfterTurn = Callable[[dict[str, Any]], bool]
+CompactionFn = Callable[[list[dict[str, Any]], CancelCallback | None], list[dict[str, Any]]]
 
 
 @dataclass
@@ -71,6 +73,10 @@ class AgentLoopConfig:
     before_tool_call: BeforeToolCall | None = None
     after_tool_call: AfterToolCall | None = None
     should_stop_after_turn: ShouldStopAfterTurn | None = None
+    compaction_enabled: bool = False
+    compaction_trigger_tokens: int | None = None
+    compaction_keep_messages: int = 6
+    compaction_fn: CompactionFn | None = None
 
 
 class PiToolExecutor:
@@ -270,7 +276,7 @@ class PiAgentRuntime:
         llm: LLMClient,
         tools: ToolRegistry,
         system_prompt: str,
-        max_steps: int = 8,
+        max_steps: int = 32,
         max_history_tokens: int | None = None,
         max_kept_full: int | None = None,
         config: AgentLoopConfig | None = None,
@@ -288,6 +294,7 @@ class PiAgentRuntime:
         self._event_sequence = 0
         self._event_started_at = time.perf_counter()
         self._last_model_elapsed_ms = 0
+        self._last_compaction: dict[str, Any] = {"state": "disabled"}
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self._context = AgentContext(system_prompt, self._messages, tools)
 
@@ -315,6 +322,11 @@ class PiAgentRuntime:
     def last_model_elapsed_ms(self) -> int:
         """返回最近一轮模型调用累计耗时。"""
         return self._last_model_elapsed_ms
+
+    @property
+    def last_compaction(self) -> dict[str, Any]:
+        """返回最近一次请求前上下文 checkpoint 的脱敏状态。"""
+        return dict(self._last_compaction)
 
     def run(
         self,
@@ -441,6 +453,109 @@ class PiAgentRuntime:
             return enforce_token_limit(transformed, self._max_history_tokens)
         return enforce_token_limit(transformed)
 
+    def _compact_context(
+        self,
+        messages: list[dict[str, Any]],
+        should_cancel: CancelCallback | None,
+    ) -> list[dict[str, Any]]:
+        """按配置创建请求级 checkpoint，不直接改写会话历史。"""
+        if not self._config.compaction_enabled:
+            self._last_compaction = {"state": "disabled"}
+            return messages
+
+        before_tokens = count_tokens(messages)
+        trigger = self._config.compaction_trigger_tokens
+        base = {
+            "before_messages": len(messages),
+            "before_tokens": before_tokens,
+        }
+        if trigger is None or trigger <= 0 or before_tokens < trigger:
+            self._last_compaction = {"state": "not_needed", **base}
+            self._emit({"type": "context_compaction", **self._last_compaction})
+            return messages
+
+        self._check_cancel(should_cancel)
+        checkpoint = deepcopy(messages)
+        try:
+            compact = (
+                self._config.compaction_fn(checkpoint, should_cancel)
+                if self._config.compaction_fn
+                else self._default_compaction(checkpoint)
+            )
+            self._check_cancel(should_cancel)
+            if not self._is_valid_context(compact):
+                raise ValueError("压缩结果不是合法消息序列")
+        except AgentCancelled:
+            self._last_compaction = {"state": "cancelled", **base}
+            self._emit({"type": "context_compaction", **self._last_compaction})
+            raise
+        except Exception:
+            self._last_compaction = {"state": "fallback", **base, "after_messages": len(messages)}
+            self._emit({"type": "context_compaction", **self._last_compaction})
+            return messages
+
+        self._last_compaction = {
+            "state": "completed",
+            **base,
+            "after_messages": len(compact),
+            "after_tokens": count_tokens(compact),
+        }
+        self._emit({"type": "context_compaction", **self._last_compaction})
+        return compact
+
+    def _default_compaction(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """保留系统提示和最近消息的确定性 checkpoint 策略。"""
+        keep = max(1, self._config.compaction_keep_messages)
+        system = messages[:1] if messages and messages[0].get("role") == "system" else []
+        tail = messages[-keep:]
+        compact = system + [message for message in tail if message not in system]
+        return self._repair_tool_messages(compact)
+
+    @staticmethod
+    def _repair_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """移除没有成对 assistant tool_call 的 tool 消息，避免制造假历史。"""
+        result: list[dict[str, Any]] = []
+        available_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") not in {
+                "system", "user", "assistant", "tool",
+            }:
+                continue
+            if message.get("role") == "tool":
+                call_id = str(message.get("tool_call_id") or "")
+                if call_id not in available_ids:
+                    continue
+            result.append(message)
+            if message.get("role") == "assistant":
+                for call in message.get("tool_calls") or []:
+                    if isinstance(call, dict) and call.get("id"):
+                        available_ids.add(str(call["id"]))
+        return result
+
+    @classmethod
+    def _is_valid_context(cls, messages: Any) -> bool:
+        """检查压缩结果是否仍是当前 LLM 可接受的基本消息序列。"""
+        if not isinstance(messages, list) or not messages:
+            return False
+        if not all(isinstance(message, dict) for message in messages):
+            return False
+        if messages[0].get("role") != "system":
+            return False
+        repaired = cls._repair_tool_messages(messages)
+        if repaired != messages:
+            return False
+        pending_ids: set[str] = set()
+        for message in messages:
+            if message.get("role") == "assistant":
+                pending_ids.update(
+                    str(call["id"])
+                    for call in message.get("tool_calls") or []
+                    if isinstance(call, dict) and call.get("id")
+                )
+            elif message.get("role") == "tool":
+                pending_ids.discard(str(message.get("tool_call_id") or ""))
+        return not pending_ids
+
     @staticmethod
     def _default_convert_to_llm(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """默认转换：当前项目内部消息已是 OpenAI 兼容格式，直接浅拷贝。"""
@@ -451,7 +566,8 @@ class PiAgentRuntime:
         tools_schema = self._tools.all_schemas()
         transform_context = self._config.transform_context or self._default_transform_context
         convert_to_llm = self._config.convert_to_llm or self._default_convert_to_llm
-        transformed_messages = transform_context(self._context.messages, should_cancel)
+        checkpoint_messages = self._compact_context(self._context.messages, should_cancel)
+        transformed_messages = transform_context(checkpoint_messages, should_cancel)
         llm_messages = convert_to_llm(transformed_messages)
         started = time.perf_counter()
 

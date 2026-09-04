@@ -83,6 +83,20 @@ describe("serialize", () => {
     expect(msg.params.enabled_tools).toEqual(["list_directory", "search_code"]);
   });
 
+  it("init 消息可携带 checkpoint 压缩配置", () => {
+    const line = serialize(buildInit({
+      workspace: "/proj",
+      api_key: "sk-x",
+      model: "gpt-4o-mini",
+      compaction_enabled: true,
+      compaction_trigger_tokens: 12000,
+      compaction_keep_messages: 6,
+    }));
+    const msg = JSON.parse(line);
+    expect(msg.params.compaction_enabled).toBe(true);
+    expect(msg.params.compaction_trigger_tokens).toBe(12000);
+  });
+
   it("中文字符不被转义", () => {
     const line = serialize(buildChat({ session: "s1", text: "做了一个选课系统" }));
     // ensure_ascii 默认 false：中文原样出现

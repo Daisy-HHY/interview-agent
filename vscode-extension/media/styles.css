@@ -423,6 +423,15 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.diagnostics__timeline {
+  margin-top: 8px;
+  max-height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--muted);
+  font: 11px/1.5 var(--vscode-editor-font-family, monospace);
+}
+
 /* ──────────────────────────────────────────────
    简历上传区
    ────────────────────────────────────────────── */
@@ -557,6 +566,14 @@ button:disabled {
   border-color: transparent;
 }
 
+.bubble--thinking.is-complete {
+  margin: 4px 0;
+}
+
+.bubble--thinking.is-complete .thinking {
+  min-height: 28px;
+}
+
 .bubble--error {
   color: var(--vscode-errorForeground);
   border-left: 3px solid var(--vscode-errorForeground);
@@ -577,52 +594,6 @@ button:disabled {
   background: var(--vscode-textCodeBlock-background);
   border-radius: 4px;
   white-space: pre-wrap;
-}
-
-.activity-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 10px 0;
-  color: var(--vscode-descriptionForeground);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.activity-row__icon,
-.activity-row__orb {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.activity-row__icon {
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.activity-row__orb {
-  display: none;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 30% 24%, rgba(255, 255, 255, 0.96), transparent 20%),
-    conic-gradient(from 65deg, #ffffff, #b9c0ca, #343a43, #030405, #ffffff);
-  box-shadow: 0 0 10px rgba(220, 234, 255, 0.2);
-  animation: orbSpin 2s linear infinite;
-}
-
-.activity-row.is-running .activity-row__orb {
-  display: inline-flex;
-}
-
-.activity-row.is-running .activity-row__icon {
-  display: none;
 }
 
 .interviewer-segment:empty {

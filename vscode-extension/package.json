@@ -100,6 +100,29 @@
           "default": 3,
           "description": "历史里保留完整（不压缩）的工具结果数量。最近的 N 个保留完整，更早的压成摘要。调大=保留更多代码细节但更贵。"
         },
+        "interview.piMaxSteps": {
+          "type": "number",
+          "default": 32,
+          "minimum": 8,
+          "description": "Pi runtime 单轮最大模型回合数。Pi 会在模型停止调用工具后结束；该值仅作为防止无限工具循环的安全阀。"
+        },
+        "interview.compactionEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pi checkpoint 上下文压缩。默认关闭；开启后达到阈值时只压缩本次模型请求上下文，失败自动回退。"
+        },
+        "interview.compactionTriggerTokens": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1,
+          "description": "Pi checkpoint 压缩触发的估算 token 数。"
+        },
+        "interview.compactionKeepMessages": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "description": "Pi checkpoint 压缩后保留的最近消息数量，系统提示始终保留。"
+        },
         "interview.agentRuntime": {
           "type": "string",
           "enum": [

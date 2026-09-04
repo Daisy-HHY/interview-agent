@@ -76,8 +76,12 @@ export interface PanelOptions {
   maxSteps?: number;
   maxHistoryTokens?: number;
   maxKeptFull?: number;
+  piMaxSteps?: number;
   agentRuntime?: "native" | "langchain" | "pi";
   enabledTools?: string[];
+  compactionEnabled?: boolean;
+  compactionTriggerTokens?: number;
+  compactionKeepMessages?: number;
 }
 
 /** 发给 Webview 的配置快照；不回传 API Key 明文。 */
@@ -844,8 +848,12 @@ export class InterviewViewProvider implements WebviewViewProvider {
       maxSteps: options.maxSteps,
       maxHistoryTokens: options.maxHistoryTokens,
       maxKeptFull: options.maxKeptFull,
+      piMaxSteps: options.piMaxSteps,
       agentRuntime: options.agentRuntime,
       enabledTools: options.enabledTools,
+      compactionEnabled: options.compactionEnabled,
+      compactionTriggerTokens: options.compactionTriggerTokens,
+      compactionKeepMessages: options.compactionKeepMessages,
     });
     this.wireAgent(webview);
     this.agent.start();

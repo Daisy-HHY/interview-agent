@@ -31,10 +31,16 @@ export interface InitRequest {
     max_steps?: number;
     max_history_tokens?: number;
     max_kept_full?: number;
+    /** Pi runtime 独立的探索预算，避免共用 native 的较小安全阀。 */
+    pi_max_steps?: number;
     /** Agent runtime：默认 native，可选 langchain 或 pi。 */
     agent_runtime?: "native" | "langchain" | "pi";
     /** 启用工具名列表；不传则 Python 使用默认基础工具。 */
     enabled_tools?: string[];
+    /** Pi checkpoint 压缩配置；默认关闭。 */
+    compaction_enabled?: boolean;
+    compaction_trigger_tokens?: number;
+    compaction_keep_messages?: number;
   };
 }
 
@@ -111,6 +117,13 @@ export interface RuntimeMetricNotification {
       result_chars?: number;
       error_kind?: string;
     }>;
+    compaction?: {
+      state: string;
+      before_messages?: number;
+      after_messages?: number;
+      before_tokens?: number;
+      after_tokens?: number;
+    };
   };
 }
 
@@ -130,6 +143,11 @@ export interface AgentEventNotification {
     result_chars?: number;
     is_error?: boolean;
     error_kind?: string;
+    state?: string;
+    before_messages?: number;
+    after_messages?: number;
+    before_tokens?: number;
+    after_tokens?: number;
   };
 }
 

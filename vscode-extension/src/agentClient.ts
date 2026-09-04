@@ -44,10 +44,16 @@ export interface AgentClientOptions {
   maxSteps?: number;
   maxHistoryTokens?: number;
   maxKeptFull?: number;
+  /** Pi runtime 独立的最大模型回合数。 */
+  piMaxSteps?: number;
   /** Agent runtime：默认 native，可切换 langchain 或 pi。 */
   agentRuntime?: "native" | "langchain" | "pi";
   /** 启用工具名列表；不传则使用默认基础工具。 */
   enabledTools?: string[];
+  /** Pi checkpoint 压缩开关和阈值；默认关闭。 */
+  compactionEnabled?: boolean;
+  compactionTriggerTokens?: number;
+  compactionKeepMessages?: number;
   /**
    * 演示模式（设计第 5E 节冒烟）：true 时用 FakeLLM 代替真实 API，
    * 零费用跑完整闭环，展示面试官对话/工具气泡/流式效果。
@@ -138,8 +144,12 @@ export class AgentClient {
       max_steps: this.options.maxSteps,
       max_history_tokens: this.options.maxHistoryTokens,
       max_kept_full: this.options.maxKeptFull,
+      pi_max_steps: this.options.piMaxSteps,
       agent_runtime: this.options.agentRuntime || "native",
       enabled_tools: this.options.enabledTools,
+      compaction_enabled: this.options.compactionEnabled,
+      compaction_trigger_tokens: this.options.compactionTriggerTokens,
+      compaction_keep_messages: this.options.compactionKeepMessages,
     }));
   }
 

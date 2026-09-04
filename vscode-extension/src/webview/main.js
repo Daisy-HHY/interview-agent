@@ -12,6 +12,7 @@
   const modelConfigSummaryEl = document.getElementById("modelConfigSummary");
   const modelTestStatusEl = document.getElementById("modelTestStatus");
   const runtimeDiagnosticsEl = document.getElementById("runtimeDiagnostics");
+  const runtimeTimelineEl = document.getElementById("runtimeTimeline");
   const dependencyPanelEl = document.getElementById("dependencyPanel");
   const dependencyMessageEl = document.getElementById("dependencyMessage");
   const dependencyCommandEl = document.getElementById("dependencyCommand");
@@ -47,6 +48,8 @@
   let workspaceState = { hasWorkspace: false, workspaceName: "", workspacePath: "" };
   let currentConfig = null;
   let actualRuntime = null;
+  let runtimeEvents = [];
+  const MAX_RUNTIME_EVENTS = 80;
 
   function setAwaiting(value) {
     awaiting = value;
@@ -251,7 +254,7 @@
         renderRuntimeMetric(msg.params);
         break;
       case "agent_event":
-        // 底层事件先完成协议兼容，完整时间线 UI 留到后续版本。
+        renderAgentEvent(msg.params);
         break;
       case "done":
         onDone();
@@ -294,7 +297,10 @@
     if (!delta) {
       return;
     }
-    removeThinkingOrb();
+    const hadTrace = finishThinkingTrace();
+    if (hadTrace) {
+      currentInterviewerBubble = null;
+    }
     if (!currentInterviewerBubble) {
       currentInterviewerBubble = appendBubble("interviewer", "面试官", "");
     }
@@ -307,11 +313,7 @@
   function onToolCall(params) {
     const { tool, phase, args, result } = params;
     if (phase === "start") {
-      let activityRow = null;
-      if (hasCurrentInterviewerContent()) {
-        removeThinkingOrb();
-        activityRow = appendActivityRow(tool, true);
-      } else if (!thinkingBubble) {
+      if (!thinkingBubble) {
         showThinkingOrb();
       }
       thinkingToolLogs.push({
@@ -319,7 +321,6 @@
         args: formatArgs(args),
         result: "",
         running: true,
-        activityRow,
       });
       updateThinkingDetails();
     } else {
@@ -329,19 +330,10 @@
       if (last) {
         last.result = result || "";
         last.running = false;
-        updateActivityRow(last.activityRow, tool, false);
-      }
-      if (awaiting && !stopping && !thinkingBubble) {
-        showThinkingOrb({ resetLogs: false });
       }
       updateThinkingDetails();
     }
     scrollToBottom();
-  }
-
-  function hasCurrentInterviewerContent() {
-    const body = currentInterviewerBubble?.querySelector(".bubble__body");
-    return Boolean(body && body.textContent.trim());
   }
 
   function getCurrentInterviewerSegment() {
@@ -357,49 +349,9 @@
     return segment;
   }
 
-  function appendActivityRow(tool, running) {
-    const body = currentInterviewerBubble.querySelector(".bubble__body");
-    const row = document.createElement("div");
-    row.className = "activity-row";
-    const orb = document.createElement("span");
-    orb.className = "activity-row__orb";
-    orb.setAttribute("aria-hidden", "true");
-    const icon = document.createElement("span");
-    icon.className = "activity-row__icon";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = "›";
-    const label = document.createElement("span");
-    label.className = "activity-row__label";
-    row.append(orb, icon, label);
-    body.appendChild(row);
-    updateActivityRow(row, tool, running);
-    return row;
-  }
-
-  function updateActivityRow(row, tool, running) {
-    if (!row) {
-      return;
-    }
-    row.classList.toggle("is-running", running);
-    const label = row.querySelector(".activity-row__label");
-    if (label) {
-      label.textContent = `${running ? "正在" : "已"}${toolActionLabel(tool)}`;
-    }
-  }
-
-  function toolActionLabel(tool) {
-    const labels = {
-      list_directory: "读取目录",
-      search_code: "搜索代码",
-      read_file: "读取文件",
-      lookup_questions: "查询题库",
-    };
-    return labels[tool] || `调用工具 ${tool || ""}`.trim();
-  }
-
   function onDone() {
     stopping = false;
-    removeThinkingOrb();
+    finishThinkingTrace();
     if (currentInterviewerBubble) {
       currentInterviewerBubble = null;
     }
@@ -411,7 +363,7 @@
   }
 
   function onCancelled(params) {
-    removeThinkingOrb();
+    finishThinkingTrace();
     const partial = params && params.partial ? String(params.partial) : "";
     const bubble = currentInterviewerBubble || appendBubble("interviewer", "面试官", "");
     currentInterviewerBubble = bubble;
@@ -433,7 +385,7 @@
 
   function onError(params) {
     stopping = false;
-    removeThinkingOrb();
+    finishThinkingTrace();
     appendBubble("error", "出错了", params.message || "未知错误");
     if (currentInterviewerBubble) {
       currentInterviewerBubble = null;
@@ -471,7 +423,9 @@
   }
 
   function showThinkingOrb(options = {}) {
-    removeThinkingOrb();
+    if (thinkingBubble) {
+      return;
+    }
     if (options.resetLogs !== false) {
       thinkingToolLogs = [];
     }
@@ -509,6 +463,28 @@
     }
     thinkingBubble.remove();
     thinkingBubble = null;
+  }
+
+  function finishThinkingTrace() {
+    if (!thinkingBubble) {
+      return false;
+    }
+    if (!thinkingToolLogs.length) {
+      removeThinkingOrb();
+      return false;
+    }
+    const orb = thinkingBubble.querySelector(".thinking-orb");
+    if (orb) {
+      orb.remove();
+    }
+    const text = thinkingBubble.querySelector(".thinking__text");
+    if (text) {
+      text.textContent = `已完成 ${thinkingToolLogs.length} 项运行步骤`;
+    }
+    thinkingBubble.classList.add("is-complete");
+    thinkingBubble = null;
+    scrollToBottom();
+    return true;
   }
 
   // ──────────────────────────────────────────────
@@ -712,8 +688,44 @@
       `runtime ${metric.runtime || "unknown"} · ${metric.status || "-"}`,
       `首 token ${firstDelta} · 模型 ${metric.model_elapsed_ms || 0}ms · 总计 ${metric.total_elapsed_ms || 0}ms`,
       `token 粗估 ${metric.estimated_tokens || 0} · 错误 ${metric.error_kind || "-"}`,
+      `压缩 ${metric.compaction?.state || "disabled"}`,
       `工具 ${tools}`,
     ].join("\n");
+  }
+
+  function renderAgentEvent(event) {
+    if (!runtimeTimelineEl || !event || !event.event) {
+      return;
+    }
+    const last = runtimeEvents[runtimeEvents.length - 1];
+    if (last && last.event === "message_update" && event.event === "message_update") {
+      last.delta_chars = (last.delta_chars || 0) + (event.delta_chars || 0);
+    } else {
+      runtimeEvents.push({
+        event: String(event.event),
+        event_seq: Number.isInteger(event.event_seq) ? event.event_seq : null,
+        elapsed_ms: Number.isInteger(event.elapsed_ms) ? event.elapsed_ms : null,
+        tool: event.tool ? String(event.tool) : "",
+        state: event.state ? String(event.state) : "",
+        delta_chars: Number.isInteger(event.delta_chars) ? event.delta_chars : 0,
+        result_chars: Number.isInteger(event.result_chars) ? event.result_chars : null,
+        error_kind: event.error_kind ? String(event.error_kind) : "",
+      });
+    }
+    runtimeEvents.sort((a, b) => (a.event_seq ?? Number.MAX_SAFE_INTEGER) - (b.event_seq ?? Number.MAX_SAFE_INTEGER));
+    runtimeEvents = runtimeEvents.slice(-MAX_RUNTIME_EVENTS);
+    runtimeTimelineEl.textContent = runtimeEvents.map(formatAgentEvent).join("\n");
+  }
+
+  function formatAgentEvent(event) {
+    const seq = event.event_seq == null ? "-" : `#${event.event_seq}`;
+    const elapsed = event.elapsed_ms == null ? "-" : `${event.elapsed_ms}ms`;
+    const target = event.tool ? ` ${event.tool}` : "";
+    const state = event.state ? ` ${event.state}` : "";
+    const delta = event.event === "message_update" ? ` ${event.delta_chars}字` : "";
+    const result = event.result_chars == null ? "" : ` 结果${event.result_chars}字`;
+    const error = event.error_kind ? ` 错误:${event.error_kind}` : "";
+    return `${seq} ${elapsed} ${event.event}${target}${state}${delta}${result}${error}`;
   }
 
   function setStatus(text) {
@@ -817,6 +829,10 @@
     currentInterviewerBubble = null;
     thinkingBubble = null;
     thinkingToolLogs = [];
+    runtimeEvents = [];
+    if (runtimeTimelineEl) {
+      runtimeTimelineEl.textContent = "暂无运行事件";
+    }
     stopping = false;
     setAwaiting(false);
     canExportReport = false;

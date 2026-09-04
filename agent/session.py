@@ -74,6 +74,10 @@ class SessionStore:
         self._max_steps: int | None = None
         self._max_history_tokens: int | None = None
         self._max_kept_full: int | None = None
+        self._pi_max_steps: int | None = None
+        self._compaction_enabled: bool | None = None
+        self._compaction_trigger_tokens: int | None = None
+        self._compaction_keep_messages: int | None = None
 
         # 每个 session 一个 AgentRuntime（含独立历史）
         self._loops: dict[str, AgentRuntime] = {}
@@ -121,8 +125,12 @@ class SessionStore:
         max_steps: int | None = None,
         max_history_tokens: int | None = None,
         max_kept_full: int | None = None,
+        pi_max_steps: int | None = None,
         agent_runtime: str = "native",
         enabled_tools: list[str] | None = None,
+        compaction_enabled: bool | None = None,
+        compaction_trigger_tokens: int | None = None,
+        compaction_keep_messages: int | None = None,
     ) -> None:
         """记录 init 消息带来的全局配置。
 
@@ -140,6 +148,7 @@ class SessionStore:
         self._max_steps = max_steps
         self._max_history_tokens = max_history_tokens
         self._max_kept_full = max_kept_full
+        self._pi_max_steps = pi_max_steps
         self._agent_runtime = (
             agent_runtime if agent_runtime in {"native", "langchain", "pi"} else "native"
         )
@@ -148,6 +157,9 @@ class SessionStore:
             if enabled_tools is not None
             else None
         )
+        self._compaction_enabled = compaction_enabled
+        self._compaction_trigger_tokens = compaction_trigger_tokens
+        self._compaction_keep_messages = compaction_keep_messages
 
     @property
     def available_tools(self) -> list[str]:
@@ -219,6 +231,8 @@ class SessionStore:
         use_configured_runtime = os.environ.get("INTERVIEW_FAKE_LLM") != "1"
         use_langchain = self._agent_runtime == "langchain" and use_configured_runtime
         use_pi = self._agent_runtime == "pi"
+        if use_pi:
+            max_steps = self._pi_max_steps or max(max_steps, 32)
         if self._agent_runtime == "langchain" and not use_configured_runtime:
             import sys
 
@@ -262,7 +276,7 @@ class SessionStore:
                 max_steps=max_steps,
                 max_history_tokens=self._max_history_tokens,
                 max_kept_full=self._max_kept_full,
-                config=self._pi_config,
+                config=self._build_pi_config(),
                 event_sink=(
                     self._event_sink_factory(session_id)
                     if self._event_sink_factory is not None
@@ -281,6 +295,22 @@ class SessionStore:
             max_history_tokens=self._max_history_tokens,
             max_kept_full=self._max_kept_full,
         )
+
+    def _build_pi_config(self):
+        """将 init 的压缩开关合并到已注入的 Pi hook 配置。"""
+        from dataclasses import replace
+
+        from agent.pi_runtime import AgentLoopConfig
+
+        config = self._pi_config or AgentLoopConfig()
+        values = {}
+        if self._compaction_enabled is not None:
+            values["compaction_enabled"] = self._compaction_enabled
+        if self._compaction_trigger_tokens is not None:
+            values["compaction_trigger_tokens"] = self._compaction_trigger_tokens
+        if self._compaction_keep_messages is not None:
+            values["compaction_keep_messages"] = self._compaction_keep_messages
+        return replace(config, **values) if values else config
 
     def _build_llm(self) -> LLMClient:
         """根据 init 配置建 LLM 客户端。
