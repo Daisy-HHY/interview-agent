@@ -73,7 +73,28 @@ python -m pip install PyMuPDF numpy rapidocr onnxruntime
 python -m pip install -e ".[agent-framework]"
 ```
 
-0.2.0 仍默认使用 `native` runtime。`pi` 是可选实验运行时：它在 Python 子进程内吸收 Pi 的事件流、上下文外置和工具生命周期钩子结构，不直接依赖 TypeScript 版 Pi 包。只有真实 runtime benchmark 达标后，才应考虑把默认值从 `native` 切换到 `pi` 或 `langchain`。
+0.2.0 仍默认使用 `native` runtime。0.2.1 继续保持这个默认值，并集中完善 `pi` 的底层边界。`pi` 是运行在 Python 子进程内的 Pi-style runtime，不是官方 Pi SDK，也不直接依赖 TypeScript 版 Pi 包。只有 runtime benchmark 在统一场景下持续达标后，才应考虑把默认值从 `native` 切换到 `pi` 或 `langchain`。
+
+### Pi-style runtime 边界
+
+项目只借鉴 Pi 的组织思想，不复制 Pi 的 TypeScript `agent_loop`、CLI、TUI 或完整扩展生态：
+
+| Pi 思想 | 当前项目实现 | 状态 |
+|---|---|---|
+| 外置上下文 | `AgentContext` + `transform_context` / `convert_to_llm` | 已实现，作为项目自己的 context pipeline |
+| 工具生命周期 | `PiToolExecutor` + before/after hook | 已实现，支持显式进程内注册 |
+| 事件流 | Pi 内部事件 + `agent_event` 脱敏协议通知 | 0.2.1 已接通，完整时间线 UI 后续实现 |
+| 上下文压缩 | 复用 `compress_history` / `enforce_token_limit` | 已实现，智能摘要压缩后续实现 |
+| 会话持久化 | `.sessions/{id}.json` 线性消息数组 | 保持现有格式，session tree 后续规划 |
+| MCP、fork、steer | 当前未实现 | 不属于 0.2.1 范围 |
+
+Pi runtime 的外部边界仍是 [agent/runtime.py](agent/runtime.py) 中的 `AgentRuntime`；会话文件由 `SessionStore` 管理，runtime 不直接读写文件。
+
+无 API Key 的底层回归可以使用 FakeLLM：
+
+```powershell
+.\.venv\Scripts\python.exe -m agent.runtime_benchmark --runtime pi --rounds 3 --fake-llm
+```
 
 工具注册已和 runtime 解耦：`native`、`langchain`、`pi` 都只接收最终的 `ToolRegistry`。当前 0.2.0 先支持基础工具的启用和禁用，后续可在同一入口接入更多工具 provider 或 MCP adapter。
 

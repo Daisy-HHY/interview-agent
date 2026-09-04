@@ -106,6 +106,22 @@ def test_pi_direct_answer_emits_events_and_records_history():
         "turn_end",
         "agent_end",
     ]
+    assert loop.events[0]["event_seq"] == 1
+    assert isinstance(loop.events[-1]["elapsed_ms"], int)
+
+
+def test_pi_restore_messages_uses_public_history_boundary():
+    """恢复历史通过公开方法完成，并同步 AgentContext。"""
+    loop = PiAgentRuntime(FakeLLM([make_text_response("ok")]), registry_with(), "sys")
+
+    restored = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "恢复的问题"},
+    ]
+    loop.restore_messages(restored)
+
+    assert loop.messages is restored
+    assert loop._context.messages is restored  # noqa: SLF001
 
 
 def test_pi_tool_call_then_answer_triggers_callbacks():

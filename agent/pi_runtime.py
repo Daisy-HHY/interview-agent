@@ -285,6 +285,8 @@ class PiAgentRuntime:
         self._config = config or AgentLoopConfig()
         self._event_sink = event_sink
         self._events: list[AgentEvent] = []
+        self._event_sequence = 0
+        self._event_started_at = time.perf_counter()
         self._last_model_elapsed_ms = 0
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self._context = AgentContext(system_prompt, self._messages, tools)
@@ -298,6 +300,11 @@ class PiAgentRuntime:
     def messages(self) -> list[dict]:
         """返回当前会话历史，保持现有 .sessions JSON 格式。"""
         return self._messages
+
+    def restore_messages(self, messages: list[dict]) -> None:
+        """恢复 SessionStore 读取的历史消息，并同步 AgentContext。"""
+        self._messages = messages
+        self._sync_context()
 
     @property
     def events(self) -> list[AgentEvent]:
@@ -319,6 +326,8 @@ class PiAgentRuntime:
     ) -> str:
         """执行一轮 pi-style Agent 循环，并映射回现有回调协议。"""
         self._last_model_elapsed_ms = 0
+        self._event_sequence = 0
+        self._event_started_at = time.perf_counter()
         self._sync_context()
         self._check_cancel(should_cancel)
         new_messages: list[dict[str, Any]] = []
@@ -486,9 +495,13 @@ class PiAgentRuntime:
 
     def _emit(self, event: AgentEvent) -> None:
         """记录并发送内部事件。"""
-        self._events.append(event)
+        self._event_sequence += 1
+        record = dict(event)
+        record["event_seq"] = self._event_sequence
+        record["elapsed_ms"] = int((time.perf_counter() - self._event_started_at) * 1000)
+        self._events.append(record)
         if self._event_sink:
-            self._event_sink(event)
+            self._event_sink(record)
 
     @staticmethod
     def _check_cancel(should_cancel: CancelCallback | None) -> None:

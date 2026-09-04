@@ -139,6 +139,23 @@ describe("parse", () => {
     expect(n?.params.partial).toBe("部分回答");
   });
 
+  it("解析 agent_event 通知", () => {
+    const n = parse(JSON.stringify({
+      method: "agent_event",
+      params: {
+        session: "s1",
+        event: "tool_execution_end",
+        event_seq: 2,
+        elapsed_ms: 10,
+        tool: "read_file",
+        args_keys: ["path"],
+        result_chars: 12,
+      },
+    }));
+
+    expect(n?.method).toBe("agent_event");
+  });
+
   it("解析 error 通知", () => {
     const n = parse(
       '{"method":"error","params":{"session":"s1","message":"API 失效"}}',

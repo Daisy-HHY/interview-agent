@@ -8,7 +8,7 @@
 
 两类消息（设计第 1.5.1 节）：
 - Request（VS Code → Python）：init / chat / stop
-- Notification（Python → VS Code）：stream / tool_call / done / error
+- Notification（Python → VS Code）：stream / tool_call / agent_event / runtime_metric / done / error
 """
 
 import json
@@ -66,7 +66,8 @@ def notify(method: str, params: dict) -> None:
     不能攒在缓冲区里（设计第 1.6 节 stdout 缓冲区陷阱）。
 
     参数：
-        method: 通知类型（stream / tool_call / done / cancelled / error）
+        method: 通知类型（stream / tool_call / agent_event / runtime_metric /
+                done / cancelled / error）
         params: 通知参数
     """
     msg = {"jsonrpc": "2.0", "method": method, "params": params}
@@ -112,6 +113,60 @@ def notify_tool_call(
 def notify_runtime_metric(session: str, metric: dict) -> None:
     """运行指标通知：展示最近一轮 runtime、耗时、工具和错误分类。"""
     notify("runtime_metric", {"session": session, **metric})
+
+
+def notify_agent_event(session: str, event: dict) -> None:
+    """发送脱敏后的 Pi 关键事件摘要，不暴露上下文和工具正文。"""
+    params = _safe_agent_event(event)
+    if params is not None:
+        notify("agent_event", {"session": session, **params})
+
+
+def _safe_agent_event(event: dict) -> dict | None:
+    """把 Pi 内部事件转换成协议允许的最小统计字段。"""
+    event_type = event.get("type")
+    if event_type not in {
+        "agent_start",
+        "agent_end",
+        "turn_start",
+        "turn_end",
+        "tool_execution_start",
+        "tool_execution_end",
+        "message_update",
+    }:
+        return None
+
+    params: dict = {"event": event_type}
+    for key in ("event_seq", "elapsed_ms", "step"):
+        value = event.get(key)
+        if isinstance(value, int):
+            params[key] = value
+
+    if event_type == "message_update":
+        params["delta_chars"] = len(str(event.get("delta") or ""))
+
+    if event_type.startswith("tool_execution_"):
+        tool_name = event.get("tool_name") or event.get("tool")
+        if tool_name:
+            params["tool"] = str(tool_name)
+        tool_call_id = event.get("tool_call_id")
+        if tool_call_id:
+            params["tool_call_id"] = str(tool_call_id)
+        args = event.get("args")
+        if isinstance(args, dict):
+            params["args_keys"] = sorted(str(key) for key in args)
+        result = event.get("result")
+        result_content = getattr(result, "content", None)
+        if result_content is None and isinstance(result, dict):
+            result_content = result.get("content")
+        if result_content is not None:
+            params["result_chars"] = len(str(result_content))
+        is_error = bool(event.get("is_error") or getattr(result, "is_error", False))
+        if is_error:
+            params["is_error"] = True
+            params["error_kind"] = "tool"
+
+    return params
 
 
 def notify_done(session: str) -> None:

@@ -13,7 +13,8 @@
 import json
 import os
 
-from agent.llm_client import FakeLLM, make_text_response
+from agent.llm_client import FakeLLM, make_text_response, make_tool_call_response
+from agent.pi_runtime import AgentLoopConfig, AgentToolResult
 from agent.session import SessionStore, build_default_registry
 
 # ──────────────────────────────────────────────
@@ -429,8 +430,8 @@ class TestTunableParams:
 
 
 class TestRuntimeSelection:
-    def test_demo_mode_forces_native_runtime(self, tmp_path, monkeypatch):
-        """Demo Mode 必须使用 native/FakeLLM，不能因配置框架 runtime 误调真实模型。"""
+    def test_demo_mode_uses_pi_runtime(self, tmp_path, monkeypatch):
+        """Demo Mode 配置 pi 时必须使用 Pi/FakeLLM，不应偷偷回退 native。"""
         monkeypatch.setenv("INTERVIEW_FAKE_LLM", "1")
         store = SessionStore()
         store.configure(
@@ -441,7 +442,32 @@ class TestRuntimeSelection:
 
         loop = store.get_or_create("s1")
 
-        assert type(loop).__name__ == "AgentLoop"
+        assert type(loop).__name__ == "PiAgentRuntime"
+        assert loop.runtime_name == "pi"
+
+    def test_pi_runtime_receives_registered_config_and_event_sink(self, tmp_path):
+        """SessionStore 创建 Pi runtime 时传入显式 hook 和事件出口。"""
+        events = []
+        store = SessionStore(llm_factory=lambda: FakeLLM([
+            make_tool_call_response("echo", {"text": "x"}),
+        ]))
+        store.set_pi_config(AgentLoopConfig(
+            before_tool_call=lambda _call, _args, _context: AgentToolResult(
+                "blocked", is_error=True, terminate=True,
+            ),
+        ))
+        store.set_event_sink_factory(lambda _session: events.append)
+        store.configure(
+            workspace=str(tmp_path),
+            api_key="sk-test",
+            agent_runtime="pi",
+        )
+
+        result = store.get_or_create("s1").run("问")
+
+        assert result == "blocked"
+        assert any(event["type"] == "agent_start" for event in events)
+        assert any(event["type"] == "tool_execution_end" for event in events)
 
     def test_builds_pi_runtime(self, tmp_path):
         """agent_runtime=pi 时创建 PiAgentRuntime。"""

@@ -53,6 +53,10 @@ class LangChainAgentRuntime:
         """暴露历史，保持 SessionStore 原 JSON 落盘格式。"""
         return self._messages
 
+    def restore_messages(self, messages: list[dict]) -> None:
+        """恢复 SessionStore 读取的历史消息。"""
+        self._messages = messages
+
     @property
     def last_model_elapsed_ms(self) -> int:
         """返回最近一轮 LangChain agent 调用耗时。"""

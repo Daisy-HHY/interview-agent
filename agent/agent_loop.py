@@ -82,6 +82,10 @@ class AgentLoop:
         """暴露历史（Phase 5 落盘用）。"""
         return self._messages
 
+    def restore_messages(self, messages: list[dict]) -> None:
+        """恢复 SessionStore 读取的历史消息。"""
+        self._messages = messages
+
     @property
     def last_model_elapsed_ms(self) -> int:
         """返回最近一轮模型请求累计耗时。"""

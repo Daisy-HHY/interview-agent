@@ -53,7 +53,7 @@ def run_input(lines, store):
     return [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
 
 
-def make_configured_store(tmp_path, script=None):
+def make_configured_store(tmp_path, script=None, agent_runtime="native"):
     """建一个已 init、用 FakeLLM 的 store。"""
     if script is None:
         script = [make_text_response("好的")]
@@ -64,6 +64,7 @@ def make_configured_store(tmp_path, script=None):
         workspace=str(tmp_path),
         api_key="sk-test",
         model="gpt-4o-mini",
+        agent_runtime=agent_runtime,
     )
     return store, fake
 
@@ -178,6 +179,30 @@ class TestChat:
         metric = next(n for n in notifications if n["method"] == "runtime_metric")
         assert metric["params"]["tools"][0]["tool"] == "read_file"
         assert isinstance(metric["params"]["tools"][0]["elapsed_ms"], int)
+
+    def test_pi_chat_emits_redacted_agent_events_and_actual_metric(self, tmp_path):
+        """Pi 路径透出脱敏事件，并报告实际 runtime。"""
+        store, _ = make_configured_store(
+            tmp_path,
+            [
+                make_tool_call_response("read_file", {"path": "app.py"}),
+                make_text_response("看到代码了"),
+            ],
+            agent_runtime="pi",
+        )
+
+        notifications = run_input(
+            [{"method": "chat", "params": {"session": "s1", "text": "看看代码"}}],
+            store,
+        )
+
+        events = [n for n in notifications if n["method"] == "agent_event"]
+        assert events
+        assert events[0]["params"]["event"] == "agent_start"
+        assert any(n["params"]["event"] == "tool_execution_end" for n in events)
+        assert all("app.py" not in json.dumps(n, ensure_ascii=False) for n in events)
+        metric = next(n for n in notifications if n["method"] == "runtime_metric")
+        assert metric["params"]["runtime"] == "pi"
 
     def test_chat_persists_history(self, tmp_path):
         """chat 后历史落盘（设计第 6.4.3 节）。"""

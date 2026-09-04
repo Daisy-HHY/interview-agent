@@ -32,6 +32,11 @@ from agent.llm_client import AgentCancelled
 from agent.session import SessionStore
 
 
+def _build_protocol_event_sink(session: str):
+    """创建当前 session 的 Pi 事件协议出口。"""
+    return lambda event: protocol.notify_agent_event(session, event)
+
+
 def main(
     stream=None,
     store: SessionStore | None = None,
@@ -48,6 +53,7 @@ def main(
         stream = sys.stdin
     if store is None:
         store = SessionStore()
+    store.ensure_event_sink_factory(_build_protocol_event_sink)
 
     import threading
 

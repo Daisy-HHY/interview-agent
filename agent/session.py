@@ -54,7 +54,12 @@ class SessionStore:
     - 子进程重启 → 从 .sessions/ 恢复历史
     """
 
-    def __init__(self, llm_factory: Callable[[], LLMClient] | None = None) -> None:
+    def __init__(
+        self,
+        llm_factory: Callable[[], LLMClient] | None = None,
+        pi_config: Any | None = None,
+        event_sink_factory: Callable[[str], Callable[[dict[str, Any]], None]] | None = None,
+    ) -> None:
         # init 消息带来的全局配置（设计第 1.5.2 节）
         self._workspace: str | None = None
         self._api_key: str | None = None
@@ -79,6 +84,27 @@ class SessionStore:
         # LLM 工厂：生产时建 OpenAIClient，测试可注入返回 FakeLLM 的工厂
         # 不传则默认用真实 OpenAI（设计第 7.2.3 节：测试不碰真 API）
         self._llm_factory = llm_factory
+        self._pi_config = pi_config
+        self._event_sink_factory = event_sink_factory
+
+    def set_pi_config(self, config: Any | None) -> None:
+        """注册进程内 Pi hook 配置，不从 workspace 自动执行 Python 文件。"""
+        self._pi_config = config
+
+    def set_event_sink_factory(
+        self,
+        factory: Callable[[str], Callable[[dict[str, Any]], None]] | None,
+    ) -> None:
+        """设置按 session 创建 Pi 内部事件出口的工厂。"""
+        self._event_sink_factory = factory
+
+    def ensure_event_sink_factory(
+        self,
+        factory: Callable[[str], Callable[[dict[str, Any]], None]],
+    ) -> None:
+        """仅在未配置事件出口时设置默认工厂，保留调用方注入的出口。"""
+        if self._event_sink_factory is None:
+            self._event_sink_factory = factory
 
     # ──────────────────────────────────────────────
     # init 配置
@@ -175,24 +201,29 @@ class SessionStore:
         # 组装系统提示（设计第 4.7 节：注入 workspace 和 resume）
         system_msg = build_system_message(self._workspace, self._resume)  # type: ignore[arg-type]
 
-        loop = self._build_runtime(tools, system_msg["content"])
+        loop = self._build_runtime(session_id, tools, system_msg["content"])
 
         # 尝试从盘恢复历史（设计第 6.4.3 节）
         self._restore(loop, session_id)
 
         return loop
 
-    def _build_runtime(self, tools: ToolRegistry, system_prompt: str) -> AgentRuntime:
+    def _build_runtime(
+        self,
+        session_id: str,
+        tools: ToolRegistry,
+        system_prompt: str,
+    ) -> AgentRuntime:
         """根据配置创建 native 或 LangChain runtime。"""
         max_steps = self._max_steps if self._max_steps is not None else 8
         use_configured_runtime = os.environ.get("INTERVIEW_FAKE_LLM") != "1"
         use_langchain = self._agent_runtime == "langchain" and use_configured_runtime
-        use_pi = self._agent_runtime == "pi" and use_configured_runtime
-        if self._agent_runtime in {"langchain", "pi"} and not use_configured_runtime:
+        use_pi = self._agent_runtime == "pi"
+        if self._agent_runtime == "langchain" and not use_configured_runtime:
             import sys
 
             sys.stderr.write(
-                f"[runtime] Demo Mode 使用 native/FakeLLM，忽略 {self._agent_runtime}。\n"
+                "[runtime] Demo Mode 使用 native/FakeLLM，忽略 langchain。\n"
             )
             sys.stderr.flush()
 
@@ -231,6 +262,12 @@ class SessionStore:
                 max_steps=max_steps,
                 max_history_tokens=self._max_history_tokens,
                 max_kept_full=self._max_kept_full,
+                config=self._pi_config,
+                event_sink=(
+                    self._event_sink_factory(session_id)
+                    if self._event_sink_factory is not None
+                    else None
+                ),
             )
 
         # 建真实 LLM 客户端（init 带来的 key/model）
@@ -348,7 +385,7 @@ class SessionStore:
         # 仅当读到的历史非空，且第一条仍是 system 时才覆盖
         # （防止历史里的 system 与当前 system_prompt 不一致导致混乱）
         if messages and messages[0].get("role") == "system":
-            loop._messages = messages  # noqa: SLF001 — 续接历史需要直接换掉
+            loop.restore_messages(messages)
 
     def _session_path(self, session_id: str) -> str:
         """一个 session 一个 JSON 文件。"""

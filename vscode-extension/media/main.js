@@ -45,6 +45,8 @@
   let resumeDropArmSentAt = 0;
   let resumeCaptureEnabled = null;
   let workspaceState = { hasWorkspace: false, workspaceName: "", workspacePath: "" };
+  let currentConfig = null;
+  let actualRuntime = null;
 
   function setAwaiting(value) {
     awaiting = value;
@@ -248,6 +250,9 @@
       case "runtime_metric":
         renderRuntimeMetric(msg.params);
         break;
+      case "agent_event":
+        // 底层事件先完成协议兼容，完整时间线 UI 留到后续版本。
+        break;
       case "done":
         onDone();
         break;
@@ -261,6 +266,8 @@
   });
 
   function applyConfig(config) {
+    currentConfig = config;
+    actualRuntime = null;
     workspaceState = {
       hasWorkspace: Boolean(config.hasWorkspace),
       workspaceName: config.workspaceName || "",
@@ -273,7 +280,7 @@
     settingsBtn.title = config.demoMode
       ? "打开设置：当前为 Demo Mode"
       : `打开设置：当前模型 ${config.model || "未配置模型"}`;
-    const runtime = config.demoMode ? "native（Demo）" : (config.agentRuntime || "native");
+    const runtime = actualRuntime || config.agentRuntime || "native";
     modelConfigSummaryEl.textContent = config.demoMode
       ? `当前：Demo Mode（不调用真实模型） · runtime ${runtime}`
       : `当前：${config.model || "未配置模型"} · ${config.baseUrl || "OpenAI 默认端点"} · runtime ${runtime} · ${config.hasApiKey ? "已配置 API Key" : "未配置 API Key"}`;
@@ -678,6 +685,13 @@
   function renderRuntimeMetric(metric) {
     if (!runtimeDiagnosticsEl || !metric) {
       return;
+    }
+    actualRuntime = metric.runtime || actualRuntime;
+    if (currentConfig) {
+      const runtime = actualRuntime || currentConfig.agentRuntime || "native";
+      modelConfigSummaryEl.textContent = currentConfig.demoMode
+        ? `当前：Demo Mode（不调用真实模型） · runtime ${runtime}`
+        : `当前：${currentConfig.model || "未配置模型"} · ${currentConfig.baseUrl || "OpenAI 默认端点"} · runtime ${runtime} · ${currentConfig.hasApiKey ? "已配置 API Key" : "未配置 API Key"}`;
     }
     const firstDelta = typeof metric.first_delta_ms === "number"
       ? `${metric.first_delta_ms}ms`

@@ -114,6 +114,25 @@ export interface RuntimeMetricNotification {
   };
 }
 
+/** Pi 内部事件的脱敏摘要，不包含完整消息、参数值或工具结果。 */
+export interface AgentEventNotification {
+  method: "agent_event";
+  params: {
+    session: string;
+    event: string;
+    event_seq?: number;
+    elapsed_ms?: number;
+    step?: number;
+    delta_chars?: number;
+    tool?: string;
+    tool_call_id?: string;
+    args_keys?: string[];
+    result_chars?: number;
+    is_error?: boolean;
+    error_kind?: string;
+  };
+}
+
 /** 本轮 Agent 循环结束。 */
 export interface DoneNotification {
   method: "done";
@@ -144,6 +163,7 @@ export type Notification =
   | StreamNotification
   | ToolCallNotification
   | RuntimeMetricNotification
+  | AgentEventNotification
   | DoneNotification
   | CancelledNotification
   | ErrorNotification;
@@ -201,6 +221,7 @@ function isNotificationShape(value: unknown): value is ParsedNotification {
     method === "stream" ||
     method === "tool_call" ||
     method === "runtime_metric" ||
+    method === "agent_event" ||
     method === "done" ||
     method === "cancelled" ||
     method === "error"

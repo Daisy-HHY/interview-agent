@@ -9,11 +9,12 @@ import argparse
 import json
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from agent.history import count_tokens
-from agent.llm_client import LLMError
+from agent.llm_client import FakeLLM, LLMError, make_text_response, make_tool_call_response
 from agent.session import SessionStore
 
 PROMPT = (
@@ -36,14 +37,21 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--output")
     parser.add_argument(
+        "--fake-llm",
+        action="store_true",
+        help="使用固定 FakeLLM，不要求 INTERVIEW_API_KEY。",
+    )
+    parser.add_argument(
         "--enabled-tools",
         help="逗号分隔的启用工具名；不传则使用默认基础工具。",
     )
     args = parser.parse_args()
 
     api_key = os.environ.get("INTERVIEW_API_KEY", "").strip()
-    if not api_key:
+    if not api_key and not args.fake_llm:
         raise SystemExit("缺少 INTERVIEW_API_KEY，未执行真实 runtime benchmark。")
+    if args.fake_llm:
+        api_key = "fake"
 
     if args.runtime == "both":
         runtimes = ["native", "langchain"]
@@ -62,6 +70,7 @@ def main() -> None:
                 runtime=runtime,
                 index=index + 1,
                 enabled_tools=_parse_enabled_tools(args.enabled_tools),
+                fake_llm=args.fake_llm,
             )
             rows.append(row)
             print(json.dumps(row, ensure_ascii=False), flush=True)
@@ -81,12 +90,37 @@ def run_once(
     runtime: str,
     index: int,
     enabled_tools: list[str] | None = None,
+    fake_llm: bool = False,
 ) -> dict[str, Any]:
-    """执行一轮真实模型调用，并返回不含敏感正文的指标。"""
-    store = SessionStore()
+    """执行一轮 runtime benchmark，可选使用无网络 FakeLLM。"""
+    with _fake_llm_environment(fake_llm):
+        return _run_once(
+            workspace=workspace,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            runtime=runtime,
+            index=index,
+            enabled_tools=enabled_tools,
+            fake_llm=fake_llm,
+        )
+
+
+def _run_once(
+    workspace: str,
+    api_key: str,
+    model: str,
+    base_url: str | None,
+    runtime: str,
+    index: int,
+    enabled_tools: list[str] | None = None,
+    fake_llm: bool = False,
+) -> dict[str, Any]:
+    """执行一轮模型调用，并返回不含敏感正文的指标。"""
+    store = SessionStore(llm_factory=_build_fake_llm) if fake_llm else SessionStore()
     store.configure(
         workspace=workspace,
-        api_key=api_key,
+        api_key=api_key or ("fake" if fake_llm else api_key),
         model=model,
         base_url=base_url,
         agent_runtime=runtime,
@@ -160,6 +194,31 @@ def run_once(
         "tool_sequence": tool_sequence,
         "tools": tools,
     }
+
+
+def _build_fake_llm() -> FakeLLM:
+    """构造固定 benchmark LLM，先调用项目读取工具再结束。"""
+    return FakeLLM([
+        make_tool_call_response("list_directory", {"path": "."}),
+        make_text_response("FakeLLM benchmark 完成"),
+    ])
+
+
+@contextmanager
+def _fake_llm_environment(enabled: bool):
+    """在单轮 benchmark 期间启用 FakeLLM 环境，并恢复原值。"""
+    if not enabled:
+        yield
+        return
+    previous = os.environ.get("INTERVIEW_FAKE_LLM")
+    os.environ["INTERVIEW_FAKE_LLM"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("INTERVIEW_FAKE_LLM", None)
+        else:
+            os.environ["INTERVIEW_FAKE_LLM"] = previous
 
 
 def _parse_enabled_tools(value: str | None) -> list[str] | None:

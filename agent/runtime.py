@@ -27,6 +27,10 @@ class AgentRuntime(Protocol):
         """返回当前会话消息历史，用于原 JSON 格式落盘。"""
         ...
 
+    def restore_messages(self, messages: list[dict]) -> None:
+        """恢复持久化消息，并同步 runtime 内部上下文。"""
+        ...
+
     @property
     def last_model_elapsed_ms(self) -> int:
         """返回最近一轮模型调用累计耗时。"""

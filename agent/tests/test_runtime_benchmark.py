@@ -41,6 +41,11 @@ class FakeStore:
         self.saved = session
 
 
+class FakeStoreWithFactory(FakeStore):
+    def __init__(self, llm_factory=None):
+        self.llm_factory = llm_factory
+
+
 def test_run_once_returns_sanitized_metric(monkeypatch):
     """benchmark 输出指标，不包含 API Key 和完整工具结果。"""
     monkeypatch.setattr(runtime_benchmark, "SessionStore", FakeStore)
@@ -132,3 +137,21 @@ def test_run_once_marks_insufficient_tool_use(monkeypatch):
     assert row["tool_call_count"] == 0
     assert row["required_tool_used"] is False
     assert row["tool_sequence"] == []
+
+
+def test_run_once_accepts_fake_llm_mode(monkeypatch):
+    """FakeLLM benchmark 模式可在不提供真实 key 时运行。"""
+    monkeypatch.setattr(runtime_benchmark, "SessionStore", FakeStoreWithFactory)
+
+    row = runtime_benchmark.run_once(
+        workspace="/project",
+        api_key="",
+        model="fake",
+        base_url=None,
+        runtime="pi",
+        index=1,
+        fake_llm=True,
+    )
+
+    assert row["runtime"] == "pi"
+    assert row["status"] == "done"

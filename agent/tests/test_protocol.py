@@ -197,6 +197,33 @@ class TestNotify:
         assert msg["params"]["runtime"] == "native"
         assert msg["params"]["tools"][0]["result_chars"] == 8
 
+    def test_notify_agent_event_redacts_context_and_tool_content(self, monkeypatch):
+        """agent_event 只输出安全摘要，不泄漏上下文、参数值和工具结果。"""
+        written = []
+        monkeypatch.setattr(protocol.sys.stdout, "write", written.append)
+        monkeypatch.setattr(protocol.sys.stdout, "flush", lambda: None)
+
+        protocol.notify_agent_event("s1", {
+            "type": "tool_execution_end",
+            "event_seq": 3,
+            "elapsed_ms": 12,
+            "tool_name": "read_file",
+            "tool_call_id": "call_1",
+            "args": {"path": "secret.env"},
+            "result": type("Result", (), {"content": "API_KEY=secret"})(),
+            "is_error": False,
+            "messages": [{"content": "full prompt secret"}],
+        })
+
+        msg = json.loads(written[0])
+        assert msg["method"] == "agent_event"
+        assert msg["params"]["event"] == "tool_execution_end"
+        assert msg["params"]["args_keys"] == ["path"]
+        assert msg["params"]["result_chars"] == len("API_KEY=secret")
+        assert "secret.env" not in written[0]
+        assert "API_KEY=secret" not in written[0]
+        assert "full prompt secret" not in written[0]
+
     def test_notify_done(self, monkeypatch):
         """完成通知。"""
         written = []
