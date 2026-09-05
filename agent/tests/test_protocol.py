@@ -217,6 +217,7 @@ class TestNotify:
 
         msg = json.loads(written[0])
         assert msg["method"] == "agent_event"
+        assert msg["params"]["schema_version"] == 1
         assert msg["params"]["event"] == "tool_execution_end"
         assert msg["params"]["args_keys"] == ["path"]
         assert msg["params"]["result_chars"] == len("API_KEY=secret")
@@ -242,9 +243,34 @@ class TestNotify:
 
         line = written[0]
         msg = json.loads(line)
+        assert msg["params"]["schema_version"] == 1
         assert msg["params"]["state"] == "fallback"
         assert msg["params"]["before_messages"] == 8
         assert "完整摘要不应输出" not in line
+
+    def test_agent_event_rejects_unknown_type_and_non_integer_metrics(self, monkeypatch):
+        """事件协议只接受稳定事件和整数指标。"""
+        written = []
+        monkeypatch.setattr(protocol.sys.stdout, "write", written.append)
+        monkeypatch.setattr(protocol.sys.stdout, "flush", lambda: None)
+
+        protocol.notify_agent_event("s1", {
+            "type": "future_event",
+            "event_seq": "1",
+        })
+        assert written == []
+
+        protocol.notify_agent_event("s1", {
+            "type": "agent_start",
+            "event_seq": True,
+            "elapsed_ms": 3.5,
+            "step": 0,
+        })
+        params = json.loads(written[0])["params"]
+        assert params["schema_version"] == 1
+        assert "event_seq" not in params
+        assert "elapsed_ms" not in params
+        assert params["step"] == 0
 
     def test_notify_done(self, monkeypatch):
         """完成通知。"""

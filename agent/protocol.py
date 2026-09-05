@@ -14,6 +14,8 @@
 import json
 import sys
 
+AGENT_EVENT_SCHEMA_VERSION = 1
+
 # ──────────────────────────────────────────────
 # 入站：解析 VS Code 发来的消息
 # ──────────────────────────────────────────────
@@ -123,7 +125,7 @@ def notify_agent_event(session: str, event: dict) -> None:
 
 
 def _safe_agent_event(event: dict) -> dict | None:
-    """把 Pi 内部事件转换成协议允许的最小统计字段。"""
+    """把 Pi 内部事件转换成版本化、脱敏的最小统计字段。"""
     event_type = event.get("type")
     if event_type not in {
         "agent_start",
@@ -137,10 +139,13 @@ def _safe_agent_event(event: dict) -> dict | None:
     }:
         return None
 
-    params: dict = {"event": event_type}
+    params: dict = {
+        "schema_version": AGENT_EVENT_SCHEMA_VERSION,
+        "event": event_type,
+    }
     for key in ("event_seq", "elapsed_ms", "step"):
         value = event.get(key)
-        if isinstance(value, int):
+        if isinstance(value, int) and not isinstance(value, bool):
             params[key] = value
 
     if event_type == "message_update":
@@ -155,9 +160,10 @@ def _safe_agent_event(event: dict) -> dict | None:
             "after_messages",
             "before_tokens",
             "after_tokens",
+            "compaction_elapsed_ms",
         ):
             value = event.get(key)
-            if isinstance(value, int):
+            if isinstance(value, int) and not isinstance(value, bool):
                 params[key] = value
 
     if event_type.startswith("tool_execution_"):

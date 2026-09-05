@@ -16,6 +16,7 @@ from agent.agent_loop import _sanitize_surrogates
 from agent.history import compress_history, count_tokens, enforce_token_limit
 from agent.llm_client import AgentCancelled, LLMClient, LLMResponse
 from agent.runtime import CancelCallback, ResponseCallback, ToolCallCallback
+from agent.runtime_budget import decide_budget
 from agent.tools.base import ToolRegistry
 
 MAX_STEPS_FALLBACK = "（已达到最大推理步数，本轮停止。你可以继续描述你的项目。）"
@@ -77,6 +78,9 @@ class AgentLoopConfig:
     compaction_trigger_tokens: int | None = None
     compaction_keep_messages: int = 6
     compaction_fn: CompactionFn | None = None
+    dynamic_budget_enabled: bool = False
+    dynamic_budget_soft_steps: int = 8
+    dynamic_budget_max_elapsed_ms: int = 600_000
 
 
 class PiToolExecutor:
@@ -295,6 +299,7 @@ class PiAgentRuntime:
         self._event_started_at = time.perf_counter()
         self._last_model_elapsed_ms = 0
         self._last_compaction: dict[str, Any] = {"state": "disabled"}
+        self._last_budget: dict[str, Any] = {}
         self._messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self._context = AgentContext(system_prompt, self._messages, tools)
 
@@ -328,6 +333,11 @@ class PiAgentRuntime:
         """返回最近一次请求前上下文 checkpoint 的脱敏状态。"""
         return dict(self._last_compaction)
 
+    @property
+    def last_budget(self) -> dict[str, Any]:
+        """返回最近一轮运行预算的脱敏统计。"""
+        return dict(self._last_budget)
+
     def run(
         self,
         user_text: str,
@@ -340,6 +350,14 @@ class PiAgentRuntime:
         self._last_model_elapsed_ms = 0
         self._event_sequence = 0
         self._event_started_at = time.perf_counter()
+        self._last_budget = {
+            "enabled": self._config.dynamic_budget_enabled,
+            "soft_limit": max(1, min(self._config.dynamic_budget_soft_steps, self._max_steps)),
+            "hard_limit": self._max_steps,
+            "steps_used": 0,
+            "hit": False,
+            "reason": "running",
+        }
         self._sync_context()
         self._check_cancel(should_cancel)
         new_messages: list[dict[str, Any]] = []
@@ -354,6 +372,14 @@ class PiAgentRuntime:
 
         for step in range(self._max_steps):
             self._check_cancel(should_cancel)
+            if self._config.dynamic_budget_enabled:
+                decision = self._check_dynamic_budget(step, last_completed_turn)
+                self._last_budget["reason"] = decision.reason
+                if not decision.allow:
+                    self._last_budget["hit"] = True
+                    self._last_budget["steps_used"] = step
+                    return self._return_budget_fallback(new_messages, on_response)
+            self._last_budget["steps_used"] = step + 1
             if last_completed_turn is not None:
                 self._prepare_next_turn(last_completed_turn)
                 self._emit({"type": "turn_start"})
@@ -394,6 +420,7 @@ class PiAgentRuntime:
                     self._emit({"type": "agent_end", "messages": list(new_messages)})
                     if on_response:
                         on_response(final)
+                    self._last_budget["reason"] = "tool_termination"
                     return final
                 continue
 
@@ -409,8 +436,20 @@ class PiAgentRuntime:
             }
             self._emit({"type": "turn_end", **turn})
             self._emit({"type": "agent_end", "messages": list(new_messages)})
+            self._last_budget["reason"] = "natural_completion"
             return content
 
+        self._last_budget["hit"] = True
+        self._last_budget["reason"] = "hard_limit"
+        self._last_budget["steps_used"] = self._max_steps
+        return self._return_budget_fallback(new_messages, on_response)
+
+    def _return_budget_fallback(
+        self,
+        new_messages: list[dict[str, Any]],
+        on_response: ResponseCallback | None,
+    ) -> str:
+        """在动态或固定预算耗尽时写入明确的 fallback。"""
         fallback = MAX_STEPS_FALLBACK
         fallback_message = {"role": "assistant", "content": fallback}
         self._messages.append(fallback_message)
@@ -421,6 +460,29 @@ class PiAgentRuntime:
             on_response(fallback)
         self._emit({"type": "agent_end", "messages": list(new_messages)})
         return fallback
+
+    def _check_dynamic_budget(
+        self,
+        step: int,
+        last_completed_turn: dict[str, Any] | None,
+    ):
+        """基于耗时、上下文压力和最近工具失败检查动态预算。"""
+        tool_failures = sum(
+            1 for result in (last_completed_turn or {}).get("tool_results", [])
+            if getattr(result, "is_error", False)
+        )
+        context_limit = self._max_history_tokens
+        context_tokens = count_tokens(self._messages)
+        return decide_budget(
+            step=step,
+            soft_limit=max(1, min(self._config.dynamic_budget_soft_steps, self._max_steps)),
+            hard_limit=self._max_steps,
+            elapsed_ms=int((time.perf_counter() - self._event_started_at) * 1000),
+            context_tokens=context_tokens,
+            context_limit=context_limit,
+            tool_failures=tool_failures,
+            max_elapsed_ms=self._config.dynamic_budget_max_elapsed_ms,
+        )
 
     def _sync_context(self) -> None:
         """同步可能由 SessionStore 恢复替换过的消息列表。"""
@@ -465,12 +527,17 @@ class PiAgentRuntime:
 
         before_tokens = count_tokens(messages)
         trigger = self._config.compaction_trigger_tokens
+        started_at = time.perf_counter()
         base = {
             "before_messages": len(messages),
             "before_tokens": before_tokens,
         }
         if trigger is None or trigger <= 0 or before_tokens < trigger:
-            self._last_compaction = {"state": "not_needed", **base}
+            self._last_compaction = {
+                "state": "not_needed",
+                "compaction_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                **base,
+            }
             self._emit({"type": "context_compaction", **self._last_compaction})
             return messages
 
@@ -486,16 +553,26 @@ class PiAgentRuntime:
             if not self._is_valid_context(compact):
                 raise ValueError("压缩结果不是合法消息序列")
         except AgentCancelled:
-            self._last_compaction = {"state": "cancelled", **base}
+            self._last_compaction = {
+                "state": "cancelled",
+                "compaction_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                **base,
+            }
             self._emit({"type": "context_compaction", **self._last_compaction})
             raise
         except Exception:
-            self._last_compaction = {"state": "fallback", **base, "after_messages": len(messages)}
+            self._last_compaction = {
+                "state": "fallback",
+                "compaction_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                **base,
+                "after_messages": len(messages),
+            }
             self._emit({"type": "context_compaction", **self._last_compaction})
             return messages
 
         self._last_compaction = {
             "state": "completed",
+            "compaction_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
             **base,
             "after_messages": len(compact),
             "after_tokens": count_tokens(compact),

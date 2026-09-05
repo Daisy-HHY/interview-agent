@@ -13,6 +13,9 @@
  * 避免在边界来回转换。
  */
 
+/** Python/TypeScript 共用的最小 runtime 事件合同版本。 */
+export const AGENT_EVENT_SCHEMA_VERSION = 1;
+
 // ──────────────────────────────────────────────
 // Request（TS → Python）—— 字段名对齐 Python main.py
 // ──────────────────────────────────────────────
@@ -123,6 +126,15 @@ export interface RuntimeMetricNotification {
       after_messages?: number;
       before_tokens?: number;
       after_tokens?: number;
+      compaction_elapsed_ms?: number;
+    };
+    budget?: {
+      enabled?: boolean;
+      soft_limit?: number;
+      hard_limit?: number;
+      steps_used?: number;
+      hit?: boolean;
+      reason?: string;
     };
   };
 }
@@ -132,6 +144,8 @@ export interface AgentEventNotification {
   method: "agent_event";
   params: {
     session: string;
+    /** 最小 runtime 事件合同版本。 */
+    schema_version: number;
     event: string;
     event_seq?: number;
     elapsed_ms?: number;

@@ -208,7 +208,12 @@ describe("Webview 面试入口模板", () => {
     expect(html).toContain('id="runtimeTimeline"');
     expect(script).toContain("function renderAgentEvent");
     expect(script).toContain("MAX_RUNTIME_EVENTS");
+    expect(script).toContain("MAX_RUNTIME_EVENT_CHARS");
+    expect(script).toContain("MAX_RUNTIME_TIMELINE_CHARS");
+    expect(script).toContain("runtimeDroppedEvents");
+    expect(script).toContain("runtimeIgnoredEvents");
     expect(script).toContain("message_update");
+    expect(script).not.toContain("localStorage");
     expect(styles).toContain(".diagnostics__timeline");
   });
 

@@ -254,6 +254,37 @@ def test_pi_default_max_steps_is_32():
     assert loop._max_steps == 32  # noqa: SLF001
 
 
+def test_pi_budget_metrics_record_natural_completion():
+    """运行预算指标能区分自然结束和达到安全阀。"""
+    loop = PiAgentRuntime(FakeLLM([make_text_response("答")]), registry_with(), "sys")
+
+    loop.run("问题")
+
+    assert loop.last_budget["steps_used"] == 1
+    assert loop.last_budget["hit"] is False
+    assert loop.last_budget["reason"] == "natural_completion"
+
+
+def test_pi_dynamic_budget_can_extend_soft_limit():
+    """低上下文压力且无工具失败时，动态预算允许继续到硬上限内。"""
+    fake = FakeLLM([
+        *(tool_response(("echo", {"text": str(index)})) for index in range(3)),
+        make_text_response("完整回答"),
+    ])
+    loop = PiAgentRuntime(
+        fake,
+        registry_with(EchoTool()),
+        "sys",
+        max_steps=4,
+        config=AgentLoopConfig(dynamic_budget_enabled=True, dynamic_budget_soft_steps=1),
+    )
+
+    assert loop.run("继续") == "完整回答"
+    assert fake.call_count == 4
+    assert loop.last_budget["hit"] is False
+    assert loop.last_budget["reason"] == "natural_completion"
+
+
 def test_pi_continues_after_native_eight_step_budget():
     """Pi 不复用 native 的 8 回合限制，直到模型无工具调用才结束。"""
     fake = FakeLLM([

@@ -49,7 +49,22 @@
   let currentConfig = null;
   let actualRuntime = null;
   let runtimeEvents = [];
+  let runtimeDroppedEvents = 0;
+  let runtimeTruncatedEvents = 0;
+  let runtimeIgnoredEvents = 0;
   const MAX_RUNTIME_EVENTS = 80;
+  const MAX_RUNTIME_EVENT_CHARS = 160;
+  const MAX_RUNTIME_TIMELINE_CHARS = 12000;
+  const KNOWN_RUNTIME_EVENTS = new Set([
+    "agent_start",
+    "agent_end",
+    "turn_start",
+    "turn_end",
+    "tool_execution_start",
+    "tool_execution_end",
+    "message_update",
+    "context_compaction",
+  ]);
 
   function setAwaiting(value) {
     awaiting = value;
@@ -684,11 +699,13 @@
         return `${item.tool} ${elapsed}${keys}${result}`;
       }).join("；")
       : "无工具调用";
+    const budget = metric.budget || {};
     runtimeDiagnosticsEl.textContent = [
       `runtime ${metric.runtime || "unknown"} · ${metric.status || "-"}`,
       `首 token ${firstDelta} · 模型 ${metric.model_elapsed_ms || 0}ms · 总计 ${metric.total_elapsed_ms || 0}ms`,
       `token 粗估 ${metric.estimated_tokens || 0} · 错误 ${metric.error_kind || "-"}`,
       `压缩 ${metric.compaction?.state || "disabled"}`,
+      `预算 ${budget.steps_used || 0}/${budget.hard_limit || "-"} · ${budget.reason || "-"}`,
       `工具 ${tools}`,
     ].join("\n");
   }
@@ -697,24 +714,87 @@
     if (!runtimeTimelineEl || !event || !event.event) {
       return;
     }
+    if (!KNOWN_RUNTIME_EVENTS.has(String(event.event))) {
+      runtimeIgnoredEvents += 1;
+      renderRuntimeTimeline();
+      return;
+    }
+    const normalized = normalizeRuntimeEvent(event);
     const last = runtimeEvents[runtimeEvents.length - 1];
-    if (last && last.event === "message_update" && event.event === "message_update") {
-      last.delta_chars = (last.delta_chars || 0) + (event.delta_chars || 0);
+    if (last && last.event === "message_update" && normalized.event === "message_update") {
+      last.delta_chars = Math.min(
+        MAX_RUNTIME_EVENT_CHARS,
+        (last.delta_chars || 0) + (normalized.delta_chars || 0),
+      );
     } else {
-      runtimeEvents.push({
-        event: String(event.event),
-        event_seq: Number.isInteger(event.event_seq) ? event.event_seq : null,
-        elapsed_ms: Number.isInteger(event.elapsed_ms) ? event.elapsed_ms : null,
-        tool: event.tool ? String(event.tool) : "",
-        state: event.state ? String(event.state) : "",
-        delta_chars: Number.isInteger(event.delta_chars) ? event.delta_chars : 0,
-        result_chars: Number.isInteger(event.result_chars) ? event.result_chars : null,
-        error_kind: event.error_kind ? String(event.error_kind) : "",
-      });
+      runtimeEvents.push(normalized);
     }
     runtimeEvents.sort((a, b) => (a.event_seq ?? Number.MAX_SAFE_INTEGER) - (b.event_seq ?? Number.MAX_SAFE_INTEGER));
-    runtimeEvents = runtimeEvents.slice(-MAX_RUNTIME_EVENTS);
-    runtimeTimelineEl.textContent = runtimeEvents.map(formatAgentEvent).join("\n");
+    capRuntimeEvents();
+    renderRuntimeTimeline();
+  }
+
+  function normalizeRuntimeEvent(event) {
+    // 只复制稳定、脱敏字段，避免把未来事件对象的正文带进内存时间线。
+    return {
+      event: String(event.event).slice(0, MAX_RUNTIME_EVENT_CHARS),
+      event_seq: Number.isInteger(event.event_seq) ? Math.max(0, event.event_seq) : null,
+      elapsed_ms: Number.isInteger(event.elapsed_ms) ? Math.max(0, event.elapsed_ms) : null,
+      step: Number.isInteger(event.step) ? Math.max(0, event.step) : null,
+      tool: boundedRuntimeText(event.tool),
+      state: boundedRuntimeText(event.state),
+      delta_chars: Number.isInteger(event.delta_chars)
+        ? Math.min(Math.max(event.delta_chars, 0), MAX_RUNTIME_EVENT_CHARS)
+        : 0,
+      result_chars: Number.isInteger(event.result_chars)
+        ? Math.max(event.result_chars, 0)
+        : null,
+      error_kind: boundedRuntimeText(event.error_kind),
+    };
+  }
+
+  function boundedRuntimeText(value) {
+    // 限制异常长字段，避免错误信息或工具名撑大诊断面板。
+    if (!value) {
+      return "";
+    }
+    const text = String(value);
+    if (text.length > MAX_RUNTIME_EVENT_CHARS) {
+      runtimeTruncatedEvents += 1;
+      return `${text.slice(0, MAX_RUNTIME_EVENT_CHARS - 1)}…`;
+    }
+    return text;
+  }
+
+  function capRuntimeEvents() {
+    // 同时限制条数和渲染字符数，避免长会话无限增长。
+    if (runtimeEvents.length > MAX_RUNTIME_EVENTS) {
+      runtimeDroppedEvents += runtimeEvents.length - MAX_RUNTIME_EVENTS;
+      runtimeEvents = runtimeEvents.slice(-MAX_RUNTIME_EVENTS);
+    }
+    while (runtimeEvents.length > 1 && runtimeEvents.map(formatAgentEvent).join("\n").length > MAX_RUNTIME_TIMELINE_CHARS) {
+      runtimeEvents.shift();
+      runtimeDroppedEvents += 1;
+    }
+  }
+
+  function renderRuntimeTimeline() {
+    // 时间线只显示调试摘要，丢弃/截断统计也保持脱敏。
+    if (!runtimeTimelineEl) {
+      return;
+    }
+    const lines = runtimeEvents.map(formatAgentEvent);
+    const notes = [];
+    if (runtimeDroppedEvents) {
+      notes.push(`已丢弃 ${runtimeDroppedEvents} 条旧事件`);
+    }
+    if (runtimeTruncatedEvents) {
+      notes.push(`已截断 ${runtimeTruncatedEvents} 条字段`);
+    }
+    if (runtimeIgnoredEvents) {
+      notes.push(`已忽略 ${runtimeIgnoredEvents} 条未知事件`);
+    }
+    runtimeTimelineEl.textContent = [...lines, ...notes].join("\n") || "暂无运行事件";
   }
 
   function formatAgentEvent(event) {
@@ -722,10 +802,12 @@
     const elapsed = event.elapsed_ms == null ? "-" : `${event.elapsed_ms}ms`;
     const target = event.tool ? ` ${event.tool}` : "";
     const state = event.state ? ` ${event.state}` : "";
+    const step = event.step == null ? "" : ` step:${event.step}`;
     const delta = event.event === "message_update" ? ` ${event.delta_chars}字` : "";
     const result = event.result_chars == null ? "" : ` 结果${event.result_chars}字`;
     const error = event.error_kind ? ` 错误:${event.error_kind}` : "";
-    return `${seq} ${elapsed} ${event.event}${target}${state}${delta}${result}${error}`;
+    return `${seq} ${elapsed}${step} ${event.event}${target}${state}${delta}${result}${error}`
+      .slice(0, MAX_RUNTIME_EVENT_CHARS * 2);
   }
 
   function setStatus(text) {
@@ -830,6 +912,9 @@
     thinkingBubble = null;
     thinkingToolLogs = [];
     runtimeEvents = [];
+    runtimeDroppedEvents = 0;
+    runtimeTruncatedEvents = 0;
+    runtimeIgnoredEvents = 0;
     if (runtimeTimelineEl) {
       runtimeTimelineEl.textContent = "暂无运行事件";
     }

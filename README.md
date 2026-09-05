@@ -109,6 +109,14 @@ Pi runtime 的外部边界仍是 [agent/runtime.py](agent/runtime.py) 中的 `Ag
 .\.venv\Scripts\python.exe -m agent.runtime_benchmark --runtime all --rounds 1 --fake-llm
 ```
 
+0.2.3 的压缩对照评测需要真实模型时，使用同一模型分别运行 baseline/compaction，输出脱敏 JSONL 和聚合指标：
+
+```powershell
+.\.venv\Scripts\python.exe -m agent.runtime_benchmark --runtime pi --rounds 3 --compaction-mode compare --compaction-seed-messages 12 --output .tmp\pi-compaction.jsonl --summary-output .tmp\pi-compaction-summary.json
+```
+
+`compression_quality_status=manual_review_required` 表示质量仍需人工按评测样本检查；FakeLLM 只验证协议、上下文合法性和回退行为，不能替代真实模型质量结论。0.2.3 不默认启用 LLM summarizer，也不默认持久化 runtime trace。
+
 checkpoint 压缩默认关闭，只在 `interview.compactionEnabled` 开启且达到阈值时影响本次模型请求上下文，不会隐式改写 `.sessions` 历史。运行中的脱敏事件会显示在诊断区域；事件不包含完整 prompt、工具参数值或工具结果。MCP adapter 目前只作为未来工具 provider 的隔离合同，未建立远程连接。
 
 ## 导出报告

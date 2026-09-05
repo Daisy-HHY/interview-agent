@@ -349,6 +349,7 @@ def _build_runtime_metric(
         "enabled_tools": enabled_tools or [],
         "tools": tool_metrics,
         "compaction": getattr(loop, "last_compaction", {"state": "disabled"}),
+        "budget": getattr(loop, "last_budget", {}),
     }
 
 

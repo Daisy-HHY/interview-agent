@@ -6,9 +6,22 @@ from agent import runtime_benchmark
 class FakeRuntime:
     last_model_elapsed_ms = 7
 
-    def __init__(self, runtime_name: str = "native", use_tool: bool = True) -> None:
+    def __init__(
+        self,
+        runtime_name: str = "native",
+        use_tool: bool = True,
+        compaction=None,
+    ) -> None:
         self.runtime_name = runtime_name
         self.use_tool = use_tool
+        self.last_compaction = compaction or {"state": "disabled"}
+        self.last_budget = {
+            "steps_used": 1,
+            "hit": False,
+            "reason": "natural_completion",
+            "soft_limit": 8,
+            "hard_limit": 32,
+        }
         self.messages = [{"role": "system", "content": "s"}]
 
     def run(self, text, on_delta=None, on_tool_call=None):
@@ -35,7 +48,13 @@ class FakeStore:
 
     def get_or_create(self, session):
         self.session = session
-        return FakeRuntime(self.config["agent_runtime"])
+        compaction = (
+            {"state": "not_needed", "before_tokens": 8, "after_tokens": 8,
+             "compaction_elapsed_ms": 1}
+            if self.config.get("compaction_enabled")
+            else {"state": "disabled"}
+        )
+        return FakeRuntime(self.config["agent_runtime"], compaction=compaction)
 
     def save(self, session):
         self.saved = session
@@ -155,3 +174,74 @@ def test_run_once_accepts_fake_llm_mode(monkeypatch):
 
     assert row["runtime"] == "pi"
     assert row["status"] == "done"
+
+
+def test_run_once_reports_compaction_metrics_and_mode(monkeypatch):
+    """benchmark 支持压缩对照所需的脱敏指标。"""
+    monkeypatch.setattr(runtime_benchmark, "SessionStore", FakeStore)
+
+    row = runtime_benchmark.run_once(
+        workspace="/project",
+        api_key="sk-secret",
+        model="gpt-test",
+        base_url=None,
+        runtime="pi",
+        index=1,
+        compaction_enabled=True,
+        compaction_trigger_tokens=10,
+        compaction_keep_messages=2,
+    )
+
+    assert row["compaction_enabled"] is True
+    assert row["compaction"]["state"] == "not_needed"
+    assert row["compression_token_saved"] is None
+    assert "sk-secret" not in str(row)
+
+
+def test_summarize_compaction_rows_returns_comparable_aggregates():
+    rows = [
+        {
+            "runtime": "pi",
+            "compaction_enabled": True,
+            "compression_token_saved": 40,
+            "compression_ratio": 0.4,
+            "compression_elapsed_ms": 3,
+            "total_elapsed_ms": 100,
+            "status": "done",
+        },
+        {
+            "runtime": "pi",
+            "compaction_enabled": True,
+            "compression_token_saved": 0,
+            "compression_ratio": 0.0,
+            "compression_elapsed_ms": 4,
+            "total_elapsed_ms": 120,
+            "status": "error",
+        },
+    ]
+
+    summary = runtime_benchmark.summarize_compaction_rows(rows)
+
+    assert summary["samples"] == 2
+    assert summary["completed"] == 1
+    assert summary["failure_rate"] == 0.5
+    assert summary["avg_token_saved"] == 20
+    assert summary["avg_compression_elapsed_ms"] == 3.5
+
+
+def test_summarize_budget_rows_reports_hit_rate():
+    rows = [
+        {"budget": {"steps_used": 2, "hit": True, "reason": "hard_limit"}},
+        {"budget": {"steps_used": 1, "hit": False, "reason": "natural_completion"}},
+    ]
+
+    summary = runtime_benchmark.summarize_budget_rows(rows)
+
+    assert summary == {
+        "samples": 2,
+        "hit_count": 1,
+        "hit_rate": 0.5,
+        "natural_completion_count": 1,
+        "avg_steps_used": 1.5,
+        "reasons": {"hard_limit": 1, "natural_completion": 1},
+    }
