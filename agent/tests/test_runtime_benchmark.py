@@ -36,6 +36,9 @@ class FakeRuntime:
 
 
 class FakeStore:
+    def __init__(self, persist=True):
+        self.persist = persist
+
     def configure(self, **kwargs):
         self.config = kwargs
         self.available_tools = [
@@ -61,7 +64,7 @@ class FakeStore:
 
 
 class FakeStoreWithFactory(FakeStore):
-    def __init__(self, llm_factory=None):
+    def __init__(self, llm_factory=None, persist=True):
         self.llm_factory = llm_factory
 
 
@@ -239,6 +242,8 @@ def test_summarize_budget_rows_reports_hit_rate():
 
     assert summary == {
         "samples": 2,
+        "total_samples": 2,
+        "missing_samples": 0,
         "hit_count": 1,
         "hit_rate": 0.5,
         "natural_completion_count": 1,

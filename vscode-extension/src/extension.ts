@@ -10,6 +10,7 @@
 
 import * as path from "path";
 import { existsSync } from "fs";
+import { readApiKey, saveApiKey } from "./credentials";
 import {
   commands,
   ConfigurationTarget,
@@ -46,7 +47,7 @@ interface InterviewConfig {
 function readConfig(): InterviewConfig {
   const cfg = workspace.getConfiguration("interview");
   return {
-    apiKey: cfg.get<string>("apiKey", ""),
+    apiKey: "", // 密钥只在模型请求前异步从 SecretStorage 读取。
     model: cfg.get<string>("model", "gpt-4o-mini"),
     baseUrl: cfg.get<string>("baseUrl", ""),
     resume: cfg.get<string>("resume", ""),
@@ -114,17 +115,22 @@ function buildPanelOptions(context: ExtensionContext): PanelOptions {
   };
 }
 
-async function saveWebviewConfig(config: WebviewConfigUpdate): Promise<void> {
+/** 保存普通配置及端点绑定的密钥；不删除用户旧设置。 */
+export async function saveWebviewConfig(
+  context: ExtensionContext, config: WebviewConfigUpdate,
+): Promise<void> {
   const cfg = workspace.getConfiguration("interview");
   const target = ConfigurationTarget.Global;
+  // 先保存凭证，失败时不把普通配置切到新服务；不自动删除旧明文设置。
+  if (typeof config.apiKey === "string" && config.apiKey.trim()) {
+    await saveApiKey(context.secrets,
+      config.baseUrl ?? cfg.get<string>("baseUrl", ""), config.apiKey);
+  }
   if (typeof config.model === "string") {
     await cfg.update("model", config.model.trim() || "gpt-4o-mini", target);
   }
   if (typeof config.baseUrl === "string") {
     await cfg.update("baseUrl", config.baseUrl.trim(), target);
-  }
-  if (typeof config.apiKey === "string" && config.apiKey.trim()) {
-    await cfg.update("apiKey", config.apiKey.trim(), target);
   }
   if (typeof config.demoMode === "boolean") {
     await cfg.update("demoMode", config.demoMode, target);
@@ -138,12 +144,30 @@ export function activate(context: ExtensionContext): void {
   const provider = new InterviewViewProvider(
     htmlBasePath,
     () => buildPanelOptions(context),
-    saveWebviewConfig,
+    (config) => saveWebviewConfig(context, config),
+    (baseUrl) => readApiKey(context.secrets, baseUrl,
+      workspace.getConfiguration("interview").get<string>("apiKey", "")),
   );
 
   // ───────── interview.start ─────────
   const startCmd = commands.registerCommand("interview.start", () => {
     provider.focus();
+  });
+
+  const keyCmd = commands.registerCommand("interview.setApiKey", async () => {
+    const baseUrl = workspace.getConfiguration("interview").get<string>("baseUrl", "");
+    const apiKey = await window.showInputBox({
+      title: "设置 API Key（加密保存）", password: true, ignoreFocusOut: true,
+      prompt: `用于当前服务：${baseUrl || "OpenAI 默认端点"}。切换服务后需重新设置。`,
+    });
+    if (!apiKey?.trim()) { return; }
+    try {
+      await saveWebviewConfig(context, { apiKey, baseUrl });
+      provider.refreshConfigFromSettings();
+      void window.showInformationMessage("API Key 已加密保存。旧设置中的明文值可在确认后自行删除。");
+    } catch {
+      void window.showErrorMessage("API Key 加密保存失败，请检查凭证服务后重试。");
+    }
   });
 
   // ───────── interview.askAboutSelection ─────────
@@ -170,6 +194,7 @@ export function activate(context: ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     startCmd,
+    keyCmd,
     askCmd,
     captureDroppedResumeTab,
     configChanged,

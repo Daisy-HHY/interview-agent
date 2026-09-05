@@ -181,11 +181,14 @@ export class InterviewViewProvider implements WebviewViewProvider {
   private resumeCaptureReady = true;
   private agentBusy = false;
   private pendingAgentRestart = false;
+  private startingAgent = false;
+  private agentGeneration = 0;
 
   constructor(
     private readonly htmlBasePath: Uri,
     private readonly buildOptions: () => PanelOptions,
     private readonly saveConfig: (config: WebviewConfigUpdate) => Promise<void>,
+    private readonly loadApiKey?: (baseUrl: string) => Promise<string>,
   ) {}
 
   /** 注册给 VS Code 的侧边栏 Webview View 创建入口。 */
@@ -248,14 +251,23 @@ export class InterviewViewProvider implements WebviewViewProvider {
   }
 
   private wireMessages(webview: Webview): void {
-    webview.onDidReceiveMessage((msg: WebviewToHostMessage) => {
+    webview.onDidReceiveMessage(async (msg: WebviewToHostMessage) => {
       if (msg.type === "ready") {
         this.postConfig(webview);
         return;
       }
       if (msg.type === "chat") {
-        if (!this.ensureAgentStarted(webview)) {
+        if (this.startingAgent || this.agentBusy) {
           return;
+        }
+        this.startingAgent = true;
+        const generation = this.agentGeneration;
+        try {
+          if (!await this.ensureAgentStarted(webview) || generation !== this.agentGeneration) {
+            return;
+          }
+        } finally {
+          if (generation === this.agentGeneration) { this.startingAgent = false; }
         }
         const attached = this.readSelection();
         this.agentBusy = true;
@@ -269,6 +281,12 @@ export class InterviewViewProvider implements WebviewViewProvider {
         return;
       }
       if (msg.type === "stop") {
+        if (this.startingAgent) {
+          this.agentGeneration += 1;
+          this.startingAgent = false;
+          void webview.postMessage({ method: "cancelled", params: { session: this.sessionId } });
+          return;
+        }
         this.agent?.send(buildStop(this.sessionId));
         return;
       }
@@ -317,7 +335,21 @@ export class InterviewViewProvider implements WebviewViewProvider {
         return;
       }
       if (msg.type === "exportReport") {
-        void this.exportReport(webview);
+        try {
+          const choice = await window.showInformationMessage(
+            "导出的 Markdown 报告会包含 JD、简历和面试对话内容，并保存到当前工作区。确认导出？",
+            { modal: true },
+            "导出报告",
+          );
+          if (choice === "导出报告") {
+            await this.exportReport(webview);
+          }
+        } catch (error) {
+          void webview.postMessage({
+            type: "reportError",
+            message: `报告导出或打开失败，请检查工作区写入权限及 .interview-agent/reports 目录。${error instanceof Error ? error.message : ""}`,
+          });
+        }
         return;
       }
       if (msg.type === "listSessions") {
@@ -598,7 +630,14 @@ export class InterviewViewProvider implements WebviewViewProvider {
 
   /** 测试当前真实模型配置；只发一条极短请求，不写入面试会话。 */
   private async testModelConnection(webview: Webview): Promise<void> {
-    const options = this.buildOptions();
+    let options: PanelOptions;
+    try {
+      options = await this.modelOptions();
+    } catch {
+      void webview.postMessage({ type: "modelTestResult", ok: false,
+        message: "API Key 加密存储不可用，请重试；未发起模型请求。" });
+      return;
+    }
     if (options.demoMode) {
       void webview.postMessage({
         type: "modelTestResult",
@@ -771,12 +810,23 @@ export class InterviewViewProvider implements WebviewViewProvider {
   }
 
   /** 按当前配置懒启动 Python Agent；无 API Key 时阻止真实调用。 */
-  private ensureAgentStarted(webview: Webview): boolean {
+  private async ensureAgentStarted(webview: Webview): Promise<boolean> {
     if (this.agent) {
       return true;
     }
 
-    const options = this.buildOptions();
+    const generation = this.agentGeneration;
+    let options: PanelOptions;
+    try {
+      options = await this.modelOptions();
+    } catch {
+      if (generation === this.agentGeneration) {
+        void webview.postMessage({ method: "error", params: { session: this.sessionId,
+          message: "API Key 加密存储不可用，请重试；未启动模型请求。" } });
+      }
+      return false;
+    }
+    if (generation !== this.agentGeneration) { return false; }
     if (!options.hasWorkspace || !options.workspace) {
       void webview.postMessage({
         method: "error",
@@ -903,12 +953,28 @@ export class InterviewViewProvider implements WebviewViewProvider {
   }
 
   private disposeAgent(): void {
+    this.agentGeneration += 1;
+    this.startingAgent = false;
+    this.agentBusy = false;
     this.agent?.dispose();
     this.agent = null;
   }
 
-  private postConfig(webview: Webview): void {
+  /** 只在需要密钥时等待宿主加密存储，Demo 不读取密钥。 */
+  private async modelOptions(): Promise<PanelOptions> {
     const options = this.buildOptions();
+    if (!options.demoMode && this.loadApiKey) {
+      options.apiKey = await this.loadApiKey(options.baseUrl ?? "");
+    }
+    return options;
+  }
+
+  /** 只向 Webview 发送密钥存在标识，永不传递密钥正文。 */
+  private async postConfig(webview: Webview): Promise<void> {
+    const generation = this.agentGeneration;
+    let options = this.buildOptions();
+    try { options = await this.modelOptions(); } catch { options.apiKey = ""; }
+    if (generation !== this.agentGeneration) { return; }
     const config: WebviewConfigSnapshot = {
       model: options.model,
       baseUrl: options.baseUrl ?? "",
@@ -1579,60 +1645,61 @@ export function sanitizeReportFileName(title: string): string {
     .slice(0, 60) || "interview-report";
 }
 
+/** 本地整理可追溯的问答与已有反馈，不调用模型或推断能力分数。 */
 export function generateMarkdownReport(input: ReportInput): string {
   const firstUser = input.messages.find((message) => message.role === "user")?.content || "";
-  const jd = extractSection(firstUser, "岗位 JD", ["简历", "当前项目", "项目路径"]);
-  const resume = extractSection(firstUser, "简历", ["当前项目", "项目路径"]);
-  const project = extractProjectName(firstUser) || input.workspaceName || "未命名项目";
-  const allText = input.messages.map((message) => message.content).join("\n");
-  const techs = extractTechKeywords(allText);
-  const userAnswers = input.messages.filter((message) => message.role === "user").slice(1);
-  const assistantQuestions = input.messages.filter((message) => message.role === "assistant");
-
+  const hasBackground = /(?:^|\n)岗位 JD：/.test(firstUser);
+  const jd = hasBackground ? extractSection(firstUser, "岗位 JD", ["简历", "当前项目", "项目路径"]) : "";
+  const resume = hasBackground ? extractSection(firstUser, "简历", ["当前项目", "项目路径"]) : "";
+  const project = (hasBackground ? extractProjectName(firstUser) : "") || input.workspaceName;
+  const firstUserIndex = input.messages.findIndex((message) => message.role === "user");
+  const answers = input.messages.map((message, index) => ({ message, index }))
+    .filter(({ message, index }) => message.role === "user" && !(hasBackground && index === firstUserIndex));
+  const questions = input.messages.filter((message) => message.role === "assistant");
+  const discussed = extractTechKeywords(questions.map((message) => message.content).join("\n"));
+  const excerpts = answers.slice(-5).flatMap(({ message, index }) => {
+    const before = input.messages[index - 1];
+    const after = input.messages[index + 1];
+    return [
+      `### 候选人消息 #${index + 1}`, "",
+      before?.role === "assistant"
+        ? `对应面试官消息 #${index}（原文）：\n${formatBlock(before.content)}`
+        : "缺少对应的面试官问题，不据此判断回答质量。", "",
+      `候选人原文：\n${formatBlock(message.content)}`, "",
+      after?.role === "assistant"
+        ? `后续面试官消息 #${index + 2}（原文，可能包含反馈或追问）：\n${formatBlock(after.content)}`
+        : "尚无对应的后续面试官反馈。", "",
+    ];
+  });
   return [
-    `# ${input.title}`,
-    "",
-    "## 基本信息",
-    "",
+    `# ${input.title}`, "",
+    "本报告为本地整理，包含原文摘录及通用建议；未执行独立模型评价，不提供能力评分。", "",
+    "## 基本信息", "",
     `- 导出时间：${input.createdAt.toLocaleString()}`,
     `- 会话 ID：${input.sessionId}`,
-    `- 当前项目：${project}`,
-    `- 项目路径：${input.workspacePath}`,
-    "",
-    "## JD 摘要",
-    "",
-    formatBlock(jd || "未提供明确 JD。"),
-    "",
-    "## 项目摘要",
-    "",
-    `- 项目：${project}`,
-    `- 识别到的技术点：${techs.length ? techs.join("、") : "待根据后续回答补充"}`,
-    resume ? `- 简历摘要：${truncate(resume, 300)}` : "- 简历摘要：未提供或仅在附件中提交。",
-    "",
-    "## 考察技术点",
-    "",
-    formatBulletList(techs.length ? techs : ["项目结构", "技术选型", "实现权衡"]),
-    "",
-    "## 回答表现",
-    "",
-    userAnswers.length
-      ? formatBulletList(userAnswers.slice(-5).map((message) => truncate(message.content, 180)))
-      : "- 本次会话还没有正式回答轮次。",
-    "",
-    "## 薄弱点",
-    "",
-    formatBulletList(buildWeaknesses(userAnswers, techs)),
-    "",
-    "## 复习建议",
-    "",
-    formatBulletList(buildReviewSuggestions(techs)),
-    "",
-    "## 对话摘要",
-    "",
-    formatBulletList(
-      assistantQuestions.slice(-5).map((message) => `面试官追问：${truncate(message.content, 180)}`),
-    ),
-    "",
+    `- 当前项目：${project || "未命名项目"}`,
+    `- 项目路径：${input.workspacePath}`, "",
+    "## JD 摘要", "",
+    hasBackground ? formatBlock(jd || "未提供明确 JD。")
+      : "背景来源缺失：未找到首次 JD 输入，可能未提供或旧历史已丢失。", "",
+    "## 项目摘要", "",
+    `- 项目：${project || "未命名项目"}`,
+    `- JD 提到的技术（岗位要求）：${extractTechKeywords(jd).join("、") || "未识别"}`,
+    `- 简历提到的技术（候选人自述，未核验）：${extractTechKeywords(resume).join("、") || "未识别"}`,
+    "- 本报告没有独立代码证据核验，不将技术关键词视为已证实的项目能力。", "",
+    "## 考察技术点", "",
+    discussed.length ? `面试官消息中提到：${discussed.join("、")}。提到不等于已充分考察。`
+      : "尚未考察，或未从面试官消息中识别到明确技术点。", "",
+    "## 回答原文摘录", "",
+    ...(excerpts.length ? excerpts : ["尚无正式回答，不能评价回答表现。", ""]),
+    "## 薄弱点", "",
+    "证据不足：本地导出不判定知识缺口；请结合上述对应问答和面试官原文复盘。",
+    "尚未考察的技术不能记为不会；回答轮数、字数和关键词均不是能力证明。", "",
+    "## 复习建议", "",
+    "以下为通用建议，不代表已发现这些薄弱点：",
+    "- 对照已有问答，检查原理、项目用法、取舍和边界是否解释清楚。",
+    "- 对尚未考察的岗位要求安排后续练习。",
+    "- 针对有原文依据的反馈再练一次，并保留前后回答作对比。", "",
   ].join("\n");
 }
 
@@ -1677,7 +1744,7 @@ function extractTechKeywords(content: string): string[] {
     "Docker", "Kubernetes", "LangChain", "RAG", "LLM", "OCR",
   ];
   const lower = content.toLowerCase();
-  return techs.filter((tech) => lower.includes(tech.toLowerCase()));
+  return techs.filter((tech) => new RegExp(`(^|[^a-z0-9_])${escapeRegex(tech.toLowerCase())}(?=$|[^a-z0-9_])`).test(lower));
 }
 
 function buildProjectTechTitle(project: string, techs: string[]): string {
@@ -1707,33 +1774,6 @@ function formatBlock(value: string): string {
     .split(/\r?\n/)
     .map((line) => `> ${line}`)
     .join("\n");
-}
-
-function formatBulletList(items: string[]): string {
-  return items.map((item) => `- ${item}`).join("\n");
-}
-
-function buildWeaknesses(userAnswers: DisplayMessage[], techs: string[]): string[] {
-  if (userAnswers.length < 2) {
-    return ["回答轮次偏少，建议继续补充项目背景、关键实现和取舍依据。"];
-  }
-  return [
-    "逐项复盘回答中没有展开的原理、边界条件和失败场景。",
-    techs.length
-      ? `优先补强 ${techs.slice(0, 3).join("、")} 的底层机制和项目落地细节。`
-      : "补充项目技术栈、核心模块和关键难点的可验证细节。",
-  ];
-}
-
-function buildReviewSuggestions(techs: string[]): string[] {
-  const focus = techs.slice(0, 4);
-  return [
-    focus.length
-      ? `围绕 ${focus.join("、")} 各准备一个“原理 - 项目用法 - 踩坑 - 优化”的回答。`
-      : "先整理项目的核心技术栈，再为每个技术点准备原理和项目用法。",
-    "把回答压缩成 2 分钟版本，再准备一个可继续深入的细节版本。",
-    "针对薄弱点补一次追问练习，重点验证是否能讲清取舍和边界。",
-  ];
 }
 
 function truncate(value: string, max: number): string {

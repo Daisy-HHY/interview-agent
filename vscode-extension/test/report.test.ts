@@ -49,4 +49,45 @@ describe("面试报告导出", () => {
     expect(canExportReport([{ role: "assistant", content: "你好" }])).toBe(false);
     expect(canExportReport([{ role: "user", content: "回答" }])).toBe(true);
   });
+
+  it("仅有 JD 不推断候选人掌握或薄弱，JavaScript 不匹配 Java", () => {
+    const report = generateMarkdownReport({ sessionId: "s", title: "test", workspaceName: "p",
+      workspacePath: "p", createdAt: new Date(), messages: [
+        { role: "user", content: "岗位 JD：\nJavaScript 开发\n简历：\n尚未提供" },
+      ] });
+    expect(report).toContain("尚未考察");
+    expect(report).not.toContain("Java、");
+    expect(report).not.toContain("JavaScript、Java");
+    expect(report).not.toContain("优先补强");
+    expect(report).toContain("本地整理");
+  });
+
+  it("不同回答保留对应原文，不生成同一份能力结论", () => {
+    const input = { sessionId: "s", title: "test", workspaceName: "p", workspacePath: "p",
+      createdAt: new Date(), messages: [
+        { role: "user" as const, content: "岗位 JD：\nRedis\n简历：\nPython" },
+        { role: "assistant" as const, content: "如何解决缓存穿透？" },
+        { role: "user" as const, content: "我还不清楚" },
+        { role: "assistant" as const, content: "可以先思考布隆过滤器。" },
+      ] };
+    const report = generateMarkdownReport(input);
+    expect(report).toContain("回答原文摘录");
+    expect(report).toContain("我还不清楚");
+    expect(report).toContain("布隆过滤器");
+    expect(report).toContain("消息 #3");
+    input.messages[2].content = "可以使用布隆过滤器并处理误判";
+    const changed = generateMarkdownReport(input);
+    expect(changed).not.toContain("我还不清楚");
+    expect(changed).toContain("处理误判");
+    expect(changed).toContain("证据不足");
+  });
+
+  it("旧会话缺少背景时不把后续问题当作 JD", () => {
+    const report = generateMarkdownReport({ sessionId: "s", title: "test", workspaceName: "p",
+      workspacePath: "p", createdAt: new Date(), messages: [
+        { role: "user", content: "继续上次的问题" },
+      ] });
+    expect(report).toContain("背景来源缺失");
+    expect(report).toContain("尚未考察");
+  });
 });

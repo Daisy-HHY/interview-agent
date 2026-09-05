@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
 import { join } from "path";
+import { runInNewContext } from "vm";
 import { describe, expect, it } from "vitest";
 
 const webviewRoot = join(__dirname, "..", "src", "webview");
@@ -232,9 +233,27 @@ describe("Webview 面试入口模板", () => {
   });
 
   it("导出报告前提示报告包含隐私内容", () => {
-    expect(script).toContain("导出的 Markdown 报告会包含 JD、简历和面试对话内容");
+    expect(panelSource).toContain("导出的 Markdown 报告会包含 JD、简历和面试对话内容");
     expect(script).toContain("reportExported");
     expect(script).toContain("reportError");
+  });
+
+  it("浏览器确认框不可用时，点击导出仍向 Host 发送请求", () => {
+    let click!: () => void;
+    const sent: unknown[] = [];
+    const button = { disabled: false, addEventListener: (_: string, fn: () => void) => { click = fn; } };
+    const start = script.indexOf('  exportReportBtn.addEventListener("click"');
+    const end = script.indexOf('  installDependenciesBtn.addEventListener', start);
+    runInNewContext(script.slice(start, end), {
+      exportReportBtn: button,
+      window: { confirm: () => false },
+      vscode: { postMessage: (message: unknown) => sent.push(message) },
+    });
+    click();
+    expect(sent).toEqual([{ type: "exportReport" }]);
+    button.disabled = true;
+    click();
+    expect(sent).toHaveLength(1);
   });
 
   it("对话区滚动，输入框固定在面板最底部", () => {

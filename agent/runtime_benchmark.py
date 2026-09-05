@@ -104,15 +104,28 @@ def main() -> None:
                 print(json.dumps(row, ensure_ascii=False), flush=True)
 
     if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
             encoding="utf-8",
         )
     if args.summary_output:
+        Path(args.summary_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.summary_output).write_text(
             json.dumps({
                 "compaction": summarize_compaction_rows(rows),
                 "budget": summarize_budget_rows(rows),
+                "by_runtime": {
+                    runtime: {
+                        "budget": summarize_budget_rows([
+                            row for row in rows if row["runtime"] == runtime
+                        ]),
+                        "compaction": summarize_compaction_rows([
+                            row for row in rows if row["runtime"] == runtime
+                        ]),
+                    }
+                    for runtime in sorted({row["runtime"] for row in rows})
+                },
             }, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
@@ -165,7 +178,8 @@ def _run_once(
     compaction_seed_messages: int = 0,
 ) -> dict[str, Any]:
     """执行一轮模型调用，并返回不含敏感正文的指标。"""
-    store = SessionStore(llm_factory=_build_fake_llm) if fake_llm else SessionStore()
+    store = (SessionStore(llm_factory=_build_fake_llm, persist=False)
+             if fake_llm else SessionStore(persist=False))
     store.configure(
         workspace=workspace,
         api_key=api_key or ("fake" if fake_llm else api_key),
@@ -210,8 +224,18 @@ def _run_once(
     status = "done"
     error_kind = None
     try:
-        loop.run(PROMPT, on_delta=on_delta, on_tool_call=on_tool_call)
-        store.save(session)
+        prompt = PROMPT
+        if compaction_seed_messages:
+            prompt += " 最后复述此前约定的项目代号与存储方案，不知道则说明缺失。"
+        answer = loop.run(prompt, on_delta=on_delta, on_tool_call=on_tool_call)
+        budget = getattr(loop, "last_budget", {})
+        stop = getattr(loop, "last_stop_reason", "natural_completion")
+        if budget.get("hit") or stop == "hard_limit":
+            status = "budget_exhausted"
+        elif stop not in {"natural_completion", "stop", None}:
+            status = "incomplete"
+        elif not answer.strip():
+            status = "empty_response"
     except LLMError as e:
         status = "error"
         error_kind = e.kind
@@ -230,6 +254,7 @@ def _run_once(
     return {
         "runtime": getattr(loop, "runtime_name", runtime),
         "configured_runtime": runtime,
+        "runtime_fallback": getattr(loop, "runtime_name", runtime) != runtime,
         "round": index,
         "status": status,
         "benchmark_status": benchmark_status,
@@ -241,6 +266,13 @@ def _run_once(
         "first_delta_ms": first_delta_ms,
         "total_elapsed_ms": int((time.perf_counter() - started_at) * 1000),
         "estimated_tokens": count_tokens(loop.messages),
+        "token_basis": "archive_characters_divided_by_3_not_billing",
+        "actual_usage": getattr(getattr(loop, "_llm", None), "usage_totals", None),
+        "sample_version": "context-facts-v1" if compaction_seed_messages else "tools-v1",
+        "fact_checks": ({"project_code": "Cedar-17" in answer,
+                         "storage": "SQLite" in answer}
+                        if compaction_seed_messages and not fake_llm and status == "done"
+                        else None),
         "error_kind": error_kind,
         "tool_call_count": len(tools),
         "required_tool_used": required_tool_used,
@@ -285,7 +317,11 @@ def _seed_compaction_history(loop: Any, message_count: int) -> None:
         role = "user" if index % 2 == 0 else "assistant"
         seeded.append({
             "role": role,
-            "content": f"压缩评测历史第 {index + 1} 条，保留任务上下文字段。" * 20,
+            "content": (
+                "评测事实：项目代号 Cedar-17；存储方案 SQLite；不使用 Redis。"
+                if index == 0 else
+                f"压缩评测历史第 {index + 1} 条：讨论工具权限、异常恢复和消息边界。" * 20
+            ),
         })
     loop.restore_messages(seeded)
 
@@ -296,7 +332,7 @@ def summarize_compaction_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         row for row in rows
         if row.get("compaction_enabled") and row.get("runtime", "pi") == "pi"
     ]
-    completed = sum(row.get("status") == "done" for row in samples)
+    completed = sum(row.get("benchmark_status", row.get("status")) == "done" for row in samples)
     saved = [
         row["compression_token_saved"]
         for row in samples
@@ -331,7 +367,11 @@ def summarize_compaction_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def summarize_budget_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """聚合预算命中率、步数和停止原因，供动态策略评估使用。"""
-    budgets = [row.get("budget") or {} for row in rows]
+    budgets = [row["budget"] for row in rows if isinstance(row.get("budget"), dict)
+               and isinstance(row["budget"].get("hit"), bool)
+               and type(row["budget"].get("steps_used")) is int
+               and row["budget"]["steps_used"] >= 0
+               and isinstance(row["budget"].get("reason"), str)]
     hit_count = sum(bool(item.get("hit")) for item in budgets)
     natural_count = sum(item.get("reason") == "natural_completion" for item in budgets)
     steps = [item["steps_used"] for item in budgets if isinstance(item.get("steps_used"), int)]
@@ -342,6 +382,8 @@ def summarize_budget_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             reasons[reason] = reasons.get(reason, 0) + 1
     return {
         "samples": len(budgets),
+        "total_samples": len(rows),
+        "missing_samples": len(rows) - len(budgets),
         "hit_count": hit_count,
         "hit_rate": hit_count / len(budgets) if budgets else None,
         "natural_completion_count": natural_count,

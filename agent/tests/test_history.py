@@ -8,6 +8,8 @@
 - token 超限时从最老的开始丢
 """
 
+import pytest
+
 from agent.history import (
     compress_history,
     compress_tool_result,
@@ -202,8 +204,9 @@ class TestEnforceTokenLimit:
             _assistant(big),
             _user(big),
         ]
-        result = enforce_token_limit(messages, max_tokens=10)
-        assert result[0]["content"] == "重要系统提示，不能丢"
+        with pytest.raises(ValueError, match="上下文"):
+            enforce_token_limit(messages, max_tokens=10)
+        assert messages[0]["content"] == "重要系统提示，不能丢"
 
     def test_latest_message_never_dropped(self):
         """★ 核心安全设计：最新用户消息永不丢（当前要回答的问题）。"""
@@ -217,12 +220,13 @@ class TestEnforceTokenLimit:
         result = enforce_token_limit(messages, max_tokens=10)
         assert result[-1]["content"] == "这是最新问题，必须保留"
 
-    def test_keeps_minimum_four_messages(self):
-        """裁剪到只剩 4 条时停止（避免删光，留点上下文）。"""
+    def test_keeps_minimum_semantic_context(self):
+        """最小上下文按系统提示及当前问题保留，不要求固定四条。"""
         big = "x" * 1000
         messages = [_system("s"), _user(big), _user(big), _user(big), _user(big), _user("last")]
         result = enforce_token_limit(messages, max_tokens=5)
-        assert len(result) >= 4  # 至少保留 4 条
+        assert result == [messages[0], messages[-1]]
+        assert count_tokens(result) <= 5
 
     def test_original_list_not_mutated(self):
         """裁剪不应修改原 list。"""

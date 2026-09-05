@@ -73,8 +73,8 @@ class LangChainAgentRuntime:
         """跑一轮 LangChain Agent，并映射回现有回调协议。"""
         self._last_model_elapsed_ms = 0
         self._check_cancel(should_cancel)
+        self.last_stop_reason = "running"
         self._messages.append({"role": "user", "content": user_text})
-        self._prepare_history()
 
         langchain_tools = build_langchain_tools(
             self._tools,
@@ -94,12 +94,14 @@ class LangChainAgentRuntime:
         except Exception as e:
             self._last_model_elapsed_ms += int((time.perf_counter() - model_started) * 1000)
             if _is_graph_recursion_error(e):
+                self.last_stop_reason = "hard_limit"
                 answer = MAX_STEPS_FALLBACK
                 if on_delta:
                     on_delta(answer)
             else:
                 raise _to_llm_error(e, self._model) from e
         else:
+            self.last_stop_reason = "natural_completion"
             self._last_model_elapsed_ms += int((time.perf_counter() - model_started) * 1000)
 
         self._messages.append({"role": "assistant", "content": answer})
@@ -107,15 +109,15 @@ class LangChainAgentRuntime:
             on_response(answer)
         return answer
 
-    def _prepare_history(self) -> None:
+    def _prepare_history(self) -> list[dict]:
+        """生成模型请求副本，不裁剪业务存档。"""
         if self._max_kept_full is not None:
-            self._messages = compress_history(self._messages, self._max_kept_full)
+            messages = compress_history(self._messages, self._max_kept_full)
         else:
-            self._messages = compress_history(self._messages)
+            messages = compress_history(self._messages)
         if self._max_history_tokens is not None:
-            self._messages = enforce_token_limit(self._messages, self._max_history_tokens)
-        else:
-            self._messages = enforce_token_limit(self._messages)
+            return enforce_token_limit(messages, self._max_history_tokens)
+        return enforce_token_limit(messages)
 
     def _create_agent(self, langchain_tools: list[Any]) -> Any:
         model = self._model_factory() if self._model_factory else self._create_model()
@@ -213,8 +215,9 @@ class LangChainAgentRuntime:
         return ""
 
     def _langchain_input_messages(self) -> list[dict]:
+        """从受预算限制的副本转换 LangChain 输入。"""
         messages = []
-        for message in self._messages:
+        for message in self._prepare_history():
             role = message.get("role")
             if role == "system" or role == "tool":
                 continue

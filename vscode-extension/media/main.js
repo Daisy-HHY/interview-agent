@@ -963,12 +963,8 @@
     if (exportReportBtn.disabled) {
       return;
     }
-    const ok = window.confirm(
-      "导出的 Markdown 报告会包含 JD、简历和面试对话内容，并保存到当前工作区。确认导出？",
-    );
-    if (ok) {
-      vscode.postMessage({ type: "exportReport" });
-    }
+    // Webview 内不使用浏览器模态框，由扩展 Host 显示原生确认框。
+    vscode.postMessage({ type: "exportReport" });
   });
   installDependenciesBtn.addEventListener("click", () => {
     vscode.postMessage({

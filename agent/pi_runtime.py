@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from agent.agent_loop import _sanitize_surrogates
-from agent.history import compress_history, count_tokens, enforce_token_limit
+from agent.history import compress_history, count_tokens, enforce_token_limit, message_groups
 from agent.llm_client import AgentCancelled, LLMClient, LLMResponse
 from agent.runtime import CancelCallback, ResponseCallback, ToolCallCallback
 from agent.runtime_budget import decide_budget
@@ -349,6 +349,7 @@ class PiAgentRuntime:
         """执行一轮 pi-style Agent 循环，并映射回现有回调协议。"""
         self._last_model_elapsed_ms = 0
         self._event_sequence = 0
+        self.last_stop_reason = "running"
         self._event_started_at = time.perf_counter()
         self._last_budget = {
             "enabled": self._config.dynamic_budget_enabled,
@@ -425,6 +426,7 @@ class PiAgentRuntime:
                 continue
 
             content = response.content
+            self.last_stop_reason = response.finish_reason or "natural_completion"
             if on_response:
                 on_response(content)
             turn = {
@@ -581,12 +583,18 @@ class PiAgentRuntime:
         return compact
 
     def _default_compaction(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """保留系统提示和最近消息的确定性 checkpoint 策略。"""
+        """按完整消息组保留最近窗口，同时保留当前问题及本轮工具链。"""
         keep = max(1, self._config.compaction_keep_messages)
-        system = messages[:1] if messages and messages[0].get("role") == "system" else []
-        tail = messages[-keep:]
-        compact = system + [message for message in tail if message not in system]
-        return self._repair_tool_messages(compact)
+        current = next((i for i in range(len(messages) - 1, -1, -1)
+                        if messages[i].get("role") == "user"), len(messages) - 1)
+        start = min(current, max(0, len(messages) - keep))
+        compact = []
+        position = 0
+        for group in message_groups(messages):
+            position += len(group)
+            if group[0].get("role") == "system" or position > start:
+                compact.extend(group)
+        return compact
 
     @staticmethod
     def _repair_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -643,7 +651,7 @@ class PiAgentRuntime:
         tools_schema = self._tools.all_schemas()
         transform_context = self._config.transform_context or self._default_transform_context
         convert_to_llm = self._config.convert_to_llm or self._default_convert_to_llm
-        checkpoint_messages = self._compact_context(self._context.messages, should_cancel)
+        checkpoint_messages = self._compact_context(deepcopy(self._context.messages), should_cancel)
         transformed_messages = transform_context(checkpoint_messages, should_cancel)
         llm_messages = convert_to_llm(transformed_messages)
         started = time.perf_counter()

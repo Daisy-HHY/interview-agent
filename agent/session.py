@@ -11,8 +11,10 @@
 
 import json
 import os
+import tempfile
 from typing import Any, Callable
 
+from agent.history import message_groups
 from agent.llm_client import LLMClient
 from agent.prompt_builder import build_system_message
 from agent.runtime import AgentRuntime, NativeAgentRuntime
@@ -59,9 +61,11 @@ class SessionStore:
         llm_factory: Callable[[], LLMClient] | None = None,
         pi_config: Any | None = None,
         event_sink_factory: Callable[[str], Callable[[dict[str, Any]], None]] | None = None,
+        persist: bool = True,
     ) -> None:
         # init 消息带来的全局配置（设计第 1.5.2 节）
         self._workspace: str | None = None
+        self._persist = persist  # benchmark 使用纯内存会话，绝不读写业务历史。
         self._api_key: str | None = None
         self._model: str = "gpt-4o-mini"
         self._base_url: str | None = None
@@ -216,7 +220,8 @@ class SessionStore:
         loop = self._build_runtime(session_id, tools, system_msg["content"])
 
         # 尝试从盘恢复历史（设计第 6.4.3 节）
-        self._restore(loop, session_id)
+        if self._persist:
+            self._restore(loop, session_id)
 
         return loop
 
@@ -391,14 +396,27 @@ class SessionStore:
         每轮对话后调用一次——子进程崩溃重启后能从上次中断处续接。
         """
         loop = self._loops.get(session_id)
-        if loop is None:
+        if loop is None or not self._persist:
             return  # 没有 loop，没东西可存
 
         os.makedirs(self._sessions_dir, exist_ok=True)
         path = self._session_path(session_id)
         messages = _clean_for_json(loop.messages)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
+        temporary = None
+        try:
+            # 同目录替换，关闭句柄后再 replace，兼容 Windows。
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self._sessions_dir,
+                prefix=".session-", suffix=".tmp", delete=False,
+            ) as f:
+                temporary = f.name
+                json.dump(messages, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
 
     def _restore(self, loop: AgentRuntime, session_id: str) -> None:
         """从盘恢复历史到 loop（文件不存在则跳过）。"""
@@ -409,13 +427,21 @@ class SessionStore:
         try:
             with open(path, encoding="utf-8") as f:
                 messages = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return  # 历史文件损坏：忽略，从头开始（不崩）
+        except (json.JSONDecodeError, OSError, UnicodeError):
+            raise ValueError("会话无法读取或已损坏，原文件已保留，请检查后重试。") from None
 
-        # 仅当读到的历史非空，且第一条仍是 system 时才覆盖
-        # （防止历史里的 system 与当前 system_prompt 不一致导致混乱）
-        if messages and messages[0].get("role") == "system":
-            loop.restore_messages(messages)
+        if not isinstance(messages, list) or not messages or not all(
+            isinstance(m, dict) and m.get("role") in {"system", "user", "assistant", "tool"}
+            and (isinstance(m.get("content"), str)
+                 or (m.get("role") == "assistant" and m.get("content") is None))
+            for m in messages
+        ) or messages[0].get("role") != "system":
+            raise ValueError("会话格式无效，原文件已保留，请检查后重试。")
+        try:
+            message_groups(messages)
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("会话工具消息不完整，原文件已保留，请检查后重试。") from None
+        loop.restore_messages(messages)
 
     def _session_path(self, session_id: str) -> str:
         """一个 session 一个 JSON 文件。"""

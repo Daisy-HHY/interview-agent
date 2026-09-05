@@ -2,7 +2,7 @@
   "name": "interview-agent",
   "displayName": "Interview Agent",
   "description": "会调工具的 AI 面试官——Agent 主动调用工具核对代码、给出基于真实代码的追问",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "publisher": "daisy-hhy",
   "license": "MIT",
   "repository": {
@@ -43,6 +43,10 @@
     },
     "commands": [
       {
+        "command": "interview.setApiKey",
+        "title": "Interview Agent: 设置 API Key（加密保存）"
+      },
+      {
         "command": "interview.start",
         "title": "Interview Agent: 开始面试"
       },
@@ -58,7 +62,8 @@
         "interview.apiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenAI 兼容服务的 API Key（必填，否则无法发起面试）。"
+          "description": "旧版 API Key 配置，仅用于兼容迁移。请使用命令 Interview Agent: 设置 API Key（加密保存）。",
+          "deprecationMessage": "新密钥请通过设置 API Key 命令保存到 SecretStorage；旧值不会自动删除。"
         },
         "interview.model": {
           "type": "string",

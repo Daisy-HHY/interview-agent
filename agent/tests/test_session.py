@@ -13,6 +13,8 @@
 import json
 import os
 
+import pytest
+
 from agent.llm_client import FakeLLM, make_text_response, make_tool_call_response
 from agent.pi_runtime import AgentLoopConfig, AgentToolResult
 from agent.session import SessionStore, build_default_registry
@@ -195,17 +197,17 @@ class TestPersistence:
         assert len(loop.messages) == 1
         assert loop.messages[0]["role"] == "system"
 
-    def test_corrupted_history_file_ignored(self, tmp_path):
-        """历史文件损坏时不崩，从头开始（容错）。"""
+    def test_corrupted_history_file_is_preserved(self, tmp_path):
+        """历史文件损坏时明确拒绝恢复，不用新会话覆盖。"""
         sessions_dir = tmp_path / ".sessions"
         sessions_dir.mkdir()
         # 写一个损坏的 JSON
         (sessions_dir / "s1.json").write_text("{不是合法json", encoding="utf-8")
 
         store, _ = make_store(tmp_path)
-        loop = store.get_or_create("s1")  # 不该抛异常
-
-        assert len(loop.messages) == 1  # 干净开始
+        with pytest.raises(ValueError, match="会话"):
+            store.get_or_create("s1")
+        assert (sessions_dir / "s1.json").read_text("utf-8") == "{不是合法json"
 
     def test_save_unknown_session_noop(self, tmp_path):
         """save 一个不存在的 session 不崩（静默）。"""
@@ -433,13 +435,11 @@ class TestTunableParams:
             max_history_tokens=50,  # 极小，强制裁剪
         )
         loop = store.get_or_create("s1")
-        loop.run("问1")
-        loop.run("问2")
-        loop.run("问3")
-
-        # token 上限 50 很小，中间老消息应被裁掉，但 system 和最新消息保留
+        with pytest.raises(ValueError, match="上下文"):
+            loop.run("问1")
+        # 系统提示本身已超预算；拒绝模型请求，但原始输入仍可保存。
         assert loop.messages[0]["role"] == "system"  # system 永不删
-        assert loop.messages[-1]["role"] == "assistant"  # 最新保留
+        assert loop.messages[-1] == {"role": "user", "content": "问1"}
 
 
 class TestRuntimeSelection:

@@ -51,6 +51,7 @@ class LLMResponse:
     content: str = ""
     tool_calls: list[dict] = field(default_factory=list)
     finish_reason: str | None = None
+    usage: dict[str, int] | None = None
 
 
 # ──────────────────────────────────────────────
@@ -275,6 +276,12 @@ class OpenAIClient:
             ) from e
         self._model = model
         self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self.usage_totals: dict[str, int | None] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "model_calls": 0,
+            "missing_usage_calls": 0,
+        }
 
     def chat(
         self,
@@ -302,10 +309,36 @@ class OpenAIClient:
         # 传了 on_delta 回调 → 用 stream=True，边收边推 delta（打字效果）
         # 没传 → 非流式（简单，FakeLLM/测试默认路径）
         if on_delta is not None:
-            return self._chat_streaming(kwargs, on_delta, should_cancel=should_cancel)
-        if should_cancel is not None and should_cancel():
-            raise AgentCancelled()
-        return self._chat_blocking(kwargs)
+            response = self._chat_streaming(kwargs, on_delta, should_cancel=should_cancel)
+        else:
+            if should_cancel is not None and should_cancel():
+                raise AgentCancelled()
+            response = self._chat_blocking(kwargs)
+        self._record_usage(response.usage)
+        return response
+
+    def _record_usage(self, usage: dict[str, int] | None) -> None:
+        """累计当前客户端实际用量；任一调用缺失时不推算总费用。"""
+        totals = getattr(self, "usage_totals", {
+            "input_tokens": 0, "output_tokens": 0, "model_calls": 0, "missing_usage_calls": 0,
+        })
+        totals["model_calls"] += 1
+        if usage is None:
+            totals["missing_usage_calls"] += 1
+            totals["input_tokens"] = totals["output_tokens"] = None
+        elif not totals["missing_usage_calls"]:
+            totals["input_tokens"] += usage["input_tokens"]
+            totals["output_tokens"] += usage["output_tokens"]
+        self.usage_totals = totals
+
+    @staticmethod
+    def _usage(value: Any) -> dict[str, int] | None:
+        """仅接受服务返回的非负整数用量。"""
+        inputs = getattr(value, "prompt_tokens", None)
+        outputs = getattr(value, "completion_tokens", None)
+        if type(inputs) is int and type(outputs) is int and inputs >= 0 and outputs >= 0:
+            return {"input_tokens": inputs, "output_tokens": outputs}
+        return None
 
     def _chat_blocking(self, kwargs: dict[str, Any]) -> LLMResponse:
         """非流式调用（默认路径，FakeLLM/单测用）。"""
@@ -313,6 +346,7 @@ class OpenAIClient:
         choice = response.choices[0]
         llm_response = self._build_response(choice.message)
         llm_response.finish_reason = getattr(choice, "finish_reason", None)
+        llm_response.usage = self._usage(getattr(response, "usage", None))
         return llm_response
 
     def test_connection(self) -> None:
@@ -335,17 +369,28 @@ class OpenAIClient:
         返回累积后的完整 LLMResponse（和 _chat_blocking 相同接口）。
         """
         kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
 
         accumulated_content = ""
         finish_reason = None
+        usage = None
+        stream = None
         # tool_calls 分片累积：{index: {id, name, arguments_parts}}
         tool_calls_acc: dict[int, dict] = {}
 
         try:
-            stream = self._client.chat.completions.create(**kwargs)
+            try:
+                stream = self._client.chat.completions.create(**kwargs)
+            except Exception as e:
+                # 仅在服务明确不接受该可选字段、且还未开始流式输出时降级。
+                if getattr(e, "status_code", None) != 400 or "stream_options" not in str(e):
+                    raise
+                kwargs.pop("stream_options")
+                stream = self._client.chat.completions.create(**kwargs)
             for chunk in stream:
                 if should_cancel is not None and should_cancel():
                     raise AgentCancelled(accumulated_content)
+                usage = self._usage(getattr(chunk, "usage", None)) or usage
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -399,10 +444,15 @@ class OpenAIClient:
                         + "\n\n⚠️ 生成中断（"
                         + err.message
                         + "）。已生成部分保留，可重新发送。",
+                        finish_reason="interrupted",
                     )
                 # 不可恢复或无内容：抛错（走外层错误处理）
                 raise err
             raise
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
         # 组装 tool_calls（按 index 排序）
         tool_calls = []
@@ -421,6 +471,7 @@ class OpenAIClient:
             content=accumulated_content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
+            usage=usage,
         )
 
     @staticmethod

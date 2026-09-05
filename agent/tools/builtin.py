@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from agent.resources.question_bank import ALIASES, QUESTION_BANK
 
@@ -46,6 +47,40 @@ def _is_ignored_dir(name: str) -> bool:
     return name in IGNORED_DIRS or name.endswith(".egg-info")
 
 
+def _resolve_path(workspace: str, path: str) -> str:
+    """同时校验请求路径与真实目标，防止链接、凭证和内部历史绕过工具边界。"""
+    root = os.path.normcase(os.path.realpath(workspace))
+    requested = os.path.abspath(os.path.join(workspace, path))
+    full = os.path.normcase(os.path.realpath(requested))
+    try:
+        inside = os.path.commonpath([root, full]) == root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError("路径越界：工具只允许访问当前工作区。")
+    for candidate in (requested, full):
+        parts = Path(os.path.relpath(candidate, root)).parts
+        for part in parts:
+            name = part.lower()
+            if name in {".git", ".sessions", ".interview-agent", ".ssh", ".aws"} or (
+                (name == ".env" or name.startswith(".env."))
+                and name not in {".env.example", ".env.sample", ".env.template"}
+            ) or name in {"id_rsa", "id_ed25519", "id_ecdsa", "credentials"} or (
+                name.endswith((".pem", ".key", ".p12", ".pfx"))
+            ):
+                raise ValueError("敏感路径：凭证及内部会话文件不允许由工具读取。")
+    return full
+
+
+def _read_bounded(path: str) -> tuple[str, bool]:
+    """最多读取 64 KiB 加一个探测字节；拒绝二进制，返回文本及截断状态。"""
+    with open(path, "rb") as stream:
+        raw = stream.read(65_537)
+    if b"\0" in raw:
+        raise ValueError("错误：不支持读取二进制文件。")
+    return raw[:65_536].decode("utf-8", errors="replace"), len(raw) > 65_536
+
+
 class ListDirectoryTool:
     """列出项目目录结构。实现 Tool 接口（鸭子类型，无需继承）。"""
 
@@ -88,7 +123,10 @@ class ListDirectoryTool:
         for name in sorted(os.listdir(full_path)):
             if _is_ignored_dir(name):
                 continue
-            entry_path = os.path.join(full_path, name)
+            try:
+                entry_path = _resolve_path(self.workspace, os.path.join(full_path, name))
+            except ValueError:
+                continue
             kind = "目录" if os.path.isdir(entry_path) else "文件"
             entries.append(f"{name} ({kind})")
         if not entries:
@@ -97,11 +135,7 @@ class ListDirectoryTool:
 
     def _resolve(self, path: str) -> str:
         """路径校验：必须在工作区内，防止越权访问。"""
-        full = os.path.realpath(os.path.join(self.workspace, path))
-        workspace_real = os.path.realpath(self.workspace)
-        if not full.startswith(workspace_real + os.sep) and full != workspace_real:
-            raise ValueError(f"路径越界: {path}")
-        return full
+        return _resolve_path(self.workspace, path)
 
 
 class SearchCodeTool:
@@ -140,35 +174,59 @@ class SearchCodeTool:
         }
 
     def execute(self, keyword: str) -> str:
+        """按路径排序搜索受限文本，达到全局二十条或扫描预算后立即结束。"""
+        if not isinstance(keyword, str) or not keyword.strip():
+            return "错误：搜索关键词不能为空。"
         results: list[str] = []
         max_results = 20  # 第 3.6 节：最多 20 处，避免结果过长带偏 LLM
-
+        limited = False
+        scanned = 0
         for root, dirs, files in os.walk(self.workspace):
-            dirs[:] = [name for name in dirs if not _is_ignored_dir(name)]
-            for fname in files:
+            allowed = []
+            for name in sorted(dirs):
+                try:
+                    _resolve_path(self.workspace, os.path.join(root, name))
+                except ValueError:
+                    continue
+                if not _is_ignored_dir(name):
+                    allowed.append(name)
+            dirs[:] = allowed
+            for fname in sorted(files):
                 if not _is_source_file(fname):
                     continue
                 fpath = os.path.join(root, fname)
                 rel_path = os.path.relpath(fpath, self.workspace)
                 try:
-                    with open(fpath, encoding="utf-8", errors="ignore") as f:
-                        for line_no, line in enumerate(f, 1):
-                            if keyword in line:
-                                results.append(f"{rel_path}:{line_no}: {line.strip()}")
-                                if len(results) >= max_results:
-                                    break
-                except OSError:
+                    fpath = _resolve_path(self.workspace, fpath)
+                    content, truncated = _read_bounded(fpath)
+                    limited |= truncated
+                    scanned += 1
+                    for line_no, line in enumerate(content.splitlines(), 1):
+                        if keyword in line:
+                            snippet = line.strip()
+                            if len(snippet) > 512:
+                                snippet = snippet[:512] + "…（行已截断）"
+                            results.append(f"{rel_path[:256]}:{line_no}: {snippet}")
+                            if len(results) >= max_results:
+                                break
+                except (OSError, ValueError):
                     continue
-                if len(results) >= max_results:
+                if len(results) >= max_results or scanned >= 128:
+                    limited = True
                     break
+            if len(results) >= max_results or scanned >= 128:
+                break
 
         if not results:
-            return f"未找到包含 '{keyword}' 的代码。"
+            return "在已扫描范围内未找到匹配。" + ("（扫描已截断）" if limited else "")
         if len(results) < max_results:
             header = f"找到 {len(results)} 处匹配："
         else:
             header = f"找到 {max_results} 处匹配（已截断）："
-        return header + "\n" + "\n".join(results)
+        return header + "\n" + "\n".join(results) + (
+            "\n（扫描已截断：每文件最多 64 KiB、每次最多 128 个文件或 20 条匹配。）"
+            if limited else ""
+        )
 
 
 class LookupQuestionsTool:
@@ -271,24 +329,21 @@ class ReadFileTool:
         if not os.path.isfile(full_path):
             return f"错误：文件 '{path}' 不存在。"
         try:
-            with open(full_path, encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
+            text, byte_truncated = _read_bounded(full_path)
+            lines = text.splitlines(keepends=True)
         except OSError as e:
             return f"读取失败: {e}"
 
-        if len(lines) > self.MAX_LINES:
+        if len(lines) > self.MAX_LINES or byte_truncated:
             truncated = "".join(lines[: self.MAX_LINES])
             note = (
-                f"\n\n...(已截断，共 {len(lines)} 行，"
-                f"只显示前 {self.MAX_LINES} 行)..."
+                "\n\n...(已截断，"
+                + (f"共 {len(lines)} 行，" if not byte_truncated else "未扫描全文，")
+                + f"最多显示前 {self.MAX_LINES} 行 / 64 KiB)..."
             )
             return truncated + note
         return "".join(lines)
 
     def _resolve(self, path: str) -> str:
         """路径校验：必须在工作区内，防止越权访问。"""
-        full = os.path.realpath(os.path.join(self.workspace, path))
-        workspace_real = os.path.realpath(self.workspace)
-        if not full.startswith(workspace_real + os.sep) and full != workspace_real:
-            raise ValueError(f"路径越界: {path}")
-        return full
+        return _resolve_path(self.workspace, path)

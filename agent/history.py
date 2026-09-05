@@ -6,6 +6,8 @@
 
 
 
+from copy import deepcopy
+
 # 第 3 层硬裁剪的 token 上限（设计第 6.2.3 节）
 # 预留空间给系统提示 + 新回复，所以设得比模型上限小很多
 MAX_HISTORY_TOKENS = 20000
@@ -80,15 +82,49 @@ def enforce_token_limit(
     messages: list[dict],
     max_tokens: int = MAX_HISTORY_TOKENS,
 ) -> list[dict]:
-    """第 3 层防线：超过 token 上限时硬裁剪（设计第 6.2.3 节）。
+    """裁剪旧消息组，保留系统及当前用户轮次；最小上下文超限时显式拒绝。
 
-    关键纪律：永远保留 messages[0]（系统提示，Agent 灵魂）
-    和 messages[-1]（最新用户消息，当前要回答的问题）。
-    丢的是中间最老的。
+    返回深拷贝，模型和请求转换不能改写业务存档。token 仍为字符估算值。
     """
-    result = list(messages)  # 不改原 list
-    while count_tokens(result) > max_tokens and len(result) > 4:
-        # 删掉 index 1（系统提示之后最早的）
-        # 不能删 [0]（系统提示），不能删 [-1]（最新消息）
-        result.pop(1)
-    return result
+    groups = message_groups(messages)
+    current = next((i for i in range(len(groups) - 1, -1, -1)
+                    if groups[i][0].get("role") == "user"), len(groups) - 1)
+    total = count_tokens(messages)
+    kept = []
+    for index, group in enumerate(groups):
+        if total > max_tokens and index < current and group[0].get("role") != "system":
+            total -= count_tokens(group)
+        else:
+            kept.extend(group)
+    if count_tokens(kept) > max_tokens:
+        raise ValueError("当前问题及工具链的最小上下文超过预算，请缩短输入或提高历史上限。")
+    return deepcopy(kept)
+
+
+def message_groups(messages: list[dict]) -> list[list[dict]]:
+    """按连续工具调用及全部结果分组；拒绝孤立、重复或缺失的工具结果。"""
+    groups: list[list[dict]] = []
+    pending: set[str] = set()
+    for message in messages:
+        role = message.get("role")
+        if role == "tool":
+            call_id = message.get("tool_call_id")
+            if call_id not in pending:
+                raise ValueError("工具上下文存在孤立或重复结果，请使用完整会话。")
+            groups[-1].append(message)
+            pending.remove(call_id)
+            continue
+        if pending:
+            raise ValueError("工具上下文缺少调用结果，请使用完整会话。")
+        groups.append([message])
+        calls = message.get("tool_calls") or []
+        if calls:
+            ids = [call.get("id") for call in calls]
+            if role != "assistant" or not all(isinstance(i, str) and i for i in ids):
+                raise ValueError("工具上下文的调用标识无效。")
+            pending = set(ids)
+            if len(pending) != len(ids):
+                raise ValueError("工具上下文存在重复调用标识。")
+    if pending:
+        raise ValueError("工具上下文缺少调用结果，请使用完整会话。")
+    return groups

@@ -120,6 +120,7 @@ class AgentLoop:
 
         self._last_model_elapsed_ms = 0
         check_cancel()
+        self.last_stop_reason = "running"
         # 把用户消息加入历史
         self._messages.append({"role": "user", "content": user_text})
 
@@ -131,19 +132,19 @@ class AgentLoop:
             # ── 每轮调 LLM 前：管理历史（设计第 6.2 节）──
             # 参数透传：None 时用 history 模块默认值（Phase 7-D 可配化）
             if self._max_kept_full is not None:
-                self._messages = compress_history(self._messages, self._max_kept_full)
+                request_messages = compress_history(self._messages, self._max_kept_full)
             else:
-                self._messages = compress_history(self._messages)
+                request_messages = compress_history(self._messages)
             if self._max_history_tokens is not None:
-                self._messages = enforce_token_limit(self._messages, self._max_history_tokens)
+                request_messages = enforce_token_limit(request_messages, self._max_history_tokens)
             else:
-                self._messages = enforce_token_limit(self._messages)
+                request_messages = enforce_token_limit(request_messages)
 
             # ── 调 LLM（传 on_delta 启用流式，Phase 7-C）──
             model_started = time.perf_counter()
             try:
                 response = self._llm.chat(
-                    self._messages,
+                    request_messages,
                     tools_schema,
                     on_delta=on_delta,
                     should_cancel=should_cancel,
@@ -170,6 +171,7 @@ class AgentLoop:
                 # 不 return，继续下一轮——LLM 拿到工具结果会再想下一步
             else:
                 # LLM 直接回答了：输出文本，结束循环
+                self.last_stop_reason = response.finish_reason or "natural_completion"
                 self._messages.append(
                     {"role": "assistant", "content": response.content}
                 )
@@ -179,6 +181,7 @@ class AgentLoop:
 
         # 循环跑满 max_steps 还没结束：触发安全阀
         fallback = "（已达到最大推理步数，本轮停止。你可以继续描述你的项目。）"
+        self.last_stop_reason = "hard_limit"
         self._messages.append({"role": "assistant", "content": fallback})
         if on_response:
             on_response(fallback)

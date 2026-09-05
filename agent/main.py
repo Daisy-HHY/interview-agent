@@ -200,7 +200,11 @@ def _handle_chat(
         protocol.notify_error(session, "未初始化：请先发送 init 消息")
         return
 
-    loop = store.get_or_create(session)
+    try:
+        loop = store.get_or_create(session)
+    except (ValueError, OSError):
+        protocol.notify_error(session, "会话无法恢复，原文件已保留。请检查存档或新建会话。")
+        return
     started_at = time.perf_counter()
     first_delta_ms: int | None = None
     tool_starts: dict[str, list[tuple[float, int]]] = {}
@@ -252,7 +256,8 @@ def _handle_chat(
             should_cancel=should_cancel,
         )
     except AgentCancelled as e:
-        store.save(session)
+        if not _save_session(store, session):
+            return
         protocol.notify_runtime_metric(
             session,
             _build_runtime_metric(
@@ -269,14 +274,12 @@ def _handle_chat(
         return
     except Exception as e:
         # LLM 调用失败等：发 error，不杀进程（设计第 6.4.1 节）
-        import traceback
-
         from agent.llm_client import LLMError
-
-        tb = traceback.format_exc()
-        # 完整堆栈打到 stderr（显示在 VS Code 的 Interview Agent 输出通道，便于诊断）
-        sys.stderr.write(tb)
+        # 不输出带请求正文的异常堆栈；保存本轮已记录的消息供重试。
+        sys.stderr.write(f"[runtime] {type(e).__name__}\n")
         sys.stderr.flush()
+        if not _save_session(store, session):
+            return
 
         # 按错误类型给用户不同提示（设计第 6.4.2 节）。
         # LLMError 携带友好中文提示；其他异常用通用格式。
@@ -304,7 +307,8 @@ def _handle_chat(
         return
 
     # 落盘历史（每轮对话后存一次，设计第 6.4.3 节）
-    store.save(session)
+    if not _save_session(store, session):
+        return
 
     protocol.notify_runtime_metric(
         session,
@@ -321,6 +325,16 @@ def _handle_chat(
 
     # 本轮结束
     protocol.notify_done(session)
+
+
+def _save_session(store: SessionStore, session: str) -> bool:
+    """保存失败时发终止错误，保留内存及旧文件供用户重试。"""
+    try:
+        store.save(session)
+        return True
+    except (OSError, TypeError, ValueError):
+        protocol.notify_error(session, "会话保存失败，旧存档已保留，请检查磁盘权限或空间后重试。")
+        return False
 
 
 def _build_runtime_metric(
